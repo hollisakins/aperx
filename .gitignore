@@ -1,0 +1,12 @@
+__pycache__
+__pycache__/
+__pycache__/*
+aperx/__pycache__
+aperx/__pycache__/
+aperx/__pycache__/*
+aperx/aperx.egg-info
+aperx/aperx.egg-info/
+aperx/aperx.egg-info/*
+aperx.egg-info
+aperx.egg-info/
+aperx.egg-info/*
