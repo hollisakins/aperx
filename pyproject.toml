@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aperx"
+version = "0.1.0"
+description = 'Package for source detection/aperture photometry'
+authors = [
+    {name = "Hollis Akins", email = "hollis.akins@gmail.com"},
+]
+license = {text = 'MIT'}
+
+# Minimum Python version
+requires-python = ">=3.11"
+
+dependencies = [
+    "astropy",
+    "photutils",
+    "numpy",
+    "matplotlib",
+    "scipy",
+    "tqdm",
+    "toml",
+    "dotmap",
+]
+
+[project.scripts]
+aperx = "aperx.engine:main"

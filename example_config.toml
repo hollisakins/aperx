@@ -1,0 +1,88 @@
+
+
+field_name = 'cosmos'
+
+# list of str, lowercase 
+filters = ['f115w'] 
+
+[directory_structure]
+    mosaic_dir = '/n23data2/hakins/jwst/mosaics' # where final mosiacs will go (within base_dir)
+    output_dir = '/n23data2/hakins/jwst/catalog/output/'
+
+
+[psf_generation]
+run = true
+psfex
+fwhm_min = 1.5
+fwhm_max = 4.0 #7.0 for LW
+min_snr = 8.0
+psf_size = 301
+output_checkimgs = true
+
+
+[psf_homogenization]
+run = true
+target_filter = 'f444w'
+
+
+[source_detection]
+run = true
+create_detection_image = true
+detection_image_type = 'chi-mean'
+
+scheme = 'hot+cold'
+mask_scale_factor = 6
+mask_min_radius = 10
+
+[source_detection.cold]
+thresh = 4.66 # 5sigma=6.0, 4.5sigma=5.55, 4.0sigma=5.10, 3.5sigma=4.66
+minarea = 15 
+deblend_nthresh = 64 
+deblend_cont = 0.001 
+clean = true
+clean_param = 2.0
+
+[source_detection.hot]
+thresh = 3.69763438 # 2.3sigma
+minarea = 8 
+deblend_nthresh = 64
+deblend_cont = 0.00001 
+clean = true
+clean_param = 0.5
+
+
+[secondary_source_detection]
+run = true
+create_detection_image = true
+detection_image_type = 'ivw'
+scheme = 'single'
+
+
+
+[photometry]
+aper_phot_native = true
+aper_phot_psfmatched = true
+aperture_diameters = [0.2, 0.3, 0.5, 0.75, 1.0] 
+
+auto_phot = true
+auto1_kron_factor = 1.1
+auto1_min_radius = 1.6
+auto2_kron_factor = 2.5
+auto2_min_radius = 3.5
+kron_corr_thresh = 3
+
+
+[post_processing]
+
+[post_processing.random_apertures]
+run = true # apply random aperture-based error rescaling
+overwrite = false # overwrite the measured random aperture curves?
+min_radius = 0.15
+max_radius = 1.5
+num_radii = 30
+num_apertures = 10000
+checkplots = true
+
+[post_processing.psf_corrections]
+run = true
+
