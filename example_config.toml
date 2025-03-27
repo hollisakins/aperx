@@ -1,6 +1,7 @@
 
 
 field_name = 'cosmos'
+tile = 'B1'
 
 # list of str, lowercase 
 filters = ['f115w'] 
@@ -11,13 +12,14 @@ filters = ['f115w']
 
 
 [psf_generation]
-run = true
-psfex
-fwhm_min = 1.5
-fwhm_max = 4.0 #7.0 for LW
-min_snr = 8.0
-psf_size = 301
-output_checkimgs = true
+    run = true
+    overwrite = false
+    psfex_install = '/usr/bin/psfex' # <-- change!
+    fwhm_min = 1.5
+    fwhm_max = 4.0 #7.0 for LW
+    min_snr = 8.0
+    psf_size = 301
+    output_checkimgs = true
 
 
 [psf_homogenization]
