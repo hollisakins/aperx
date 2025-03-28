@@ -1,36 +1,76 @@
 
 
 field_name = 'cosmos'
-tile = 'B1'
+tiles = ['B1','B2','B3']
 
-# list of str, lowercase 
-filters = ['f115w'] 
+# Filters ot include in the catalog (list of str, lowercase)
+filters = ['f444w'] 
 
-[directory_structure]
-    mosaic_dir = '/n23data2/hakins/jwst/mosaics' # where final mosiacs will go (within base_dir)
-    output_dir = '/n23data2/hakins/jwst/catalog/output/'
+# Where catalog output will be stored
+output_dir = '/n23data2/hakins/jwst/catalog/output/'
 
+
+##########################################################################################
+# This section specifies the input mosaics that you want to use. 
+# Use [brackets] for keywords which will be replaced within the code. 
+# Valid keywords include [filter], [field_name], [pixel_scale], [version], [tile], [ext]
+# Note that you can provide multiple specifications of the mosaics, e.g., for different instruments 
+# which are named differently. `filters` and `tiles` specified with the mosaic spec tell the code
+# which filters and/or tiles this is valid for.
+# [ext], [filter], and [tile] will be automatically inferred and replaced as needed within the code
+# other keywords need to be specified in the config. 
+# the config will always adopt the lowest-level nested definition, i.e., if `version` is defined only 
+# a certain subset of the mosaics, it will use that
+
+[[mosaics]]
+    pixel_scale = '30mas'
+    version = 'v0p2'
+    filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+    filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+    filters = ['f090w','f115w','f150w','f200w','f277w','f356w','f410m','f444w']
+
+[[mosaics]]
+    pixel_scale = '30mas'
+    sci_ext = 'drz'
+    filters = ['f814w']
+    tiles = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10']
+    filepath = '/n23data2/cosmosweb/COSMOS-Web_Jan24/ACS/'
+    filename = 'mosaic_cosmos_web_2024jan_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
+    
+[[mosaics]]
+    pixel_scale = '30mas'
+    filters = ['f814w']
+    tiles = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10']
+    filepath = '/n23data2/cosmosweb/COSMOS-Web_Apr23/ACS/'
+    filename = 'mosaic_cosmos_web_2023apr_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
+    
+
+##########################################################################################
+# This section begins the configuration for the catalog generation. To start, we have a 
+# number of pre-processing steps.
 
 [psf_generation]
-    run = true
+    run = true # Run PSF generation with PSFEx? 
+    split_by_tile = false # Split by tile? Usually false
     overwrite = false
-    psfex_install = '/usr/bin/psfex' # <-- change!
-    fwhm_min = 1.5
-    fwhm_max = 4.0 #7.0 for LW
-    min_snr = 8.0
-    psf_size = 301
+    psfex_install = '/softs/astromatic/psfex/3.22.1/bin/psfex' # <-- change!
+    fwhm_min_scale = 0.75  # Minimum FWHM for star selection, scale factor from nominal PSF FWHM
+    fwhm_max_scale = 1.75  # Minimum FWHM for star selection, scale factor from nominal PSF FWHM
+    max_ellip = 0.1 # Maximum ellipticity for star selection
+    min_snr = 8.0 # Minimum SNR for star selection
+    psf_size = 301 # PSF array size
     output_checkimgs = true
 
 
 [psf_homogenization]
-run = true
-target_filter = 'f444w'
+    run = true
+    target_filter = 'f444w'
 
 
 [source_detection]
-run = true
-create_detection_image = true
-detection_image_type = 'chi-mean'
+    run = true
+    create_detection_image = true
+    detection_image_type = 'chi-mean'
 
 scheme = 'hot+cold'
 mask_scale_factor = 6
@@ -59,32 +99,32 @@ create_detection_image = true
 detection_image_type = 'ivw'
 scheme = 'single'
 
-
-
 [photometry]
-aper_phot_native = true
-aper_phot_psfmatched = true
-aperture_diameters = [0.2, 0.3, 0.5, 0.75, 1.0] 
+    run = true
+    aper_phot_native = true
+    aper_phot_psfmatched = true
+    aperture_diameters = [0.2, 0.3, 0.5, 0.75, 1.0] 
 
-auto_phot = true
-auto1_kron_factor = 1.1
-auto1_min_radius = 1.6
-auto2_kron_factor = 2.5
-auto2_min_radius = 3.5
-kron_corr_thresh = 3
+    auto_phot = true
+    auto1_kron_factor = 1.1
+    auto1_min_radius = 1.6
+    auto2_kron_factor = 2.5
+    auto2_min_radius = 3.5
+    kron_corr_thresh = 3
 
 
 [post_processing]
+    run = true # Run post processing steps? Must be true for any of the following steps to run. 
 
-[post_processing.random_apertures]
-run = true # apply random aperture-based error rescaling
-overwrite = false # overwrite the measured random aperture curves?
-min_radius = 0.15
-max_radius = 1.5
-num_radii = 30
-num_apertures = 10000
-checkplots = true
+    [post_processing.random_apertures]
+        run = true # apply random aperture-based error rescaling
+        overwrite = false # overwrite the measured random aperture curves?
+        min_radius = 0.15
+        max_radius = 1.5
+        num_radii = 30
+        num_apertures = 10000
+        checkplots = true
 
-[post_processing.psf_corrections]
-run = true
-
+    [post_processing.psf_corrections]
+        run = true
+    

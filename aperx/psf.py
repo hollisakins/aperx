@@ -1,3 +1,38 @@
+from .image import Image
+import os
+
+
+nominal_psf_fwhms = {
+    'f070w': 0.023,
+    'f090w': 0.030,
+    'f115w': 0.037,
+    'f140m': 0.046,
+    'f150w': 0.049,
+    'f162m': 0.053,
+    'f164n': 0.054,
+    'f150w2': 0.045,
+    'f182m': 0.060,
+    'f187n': 0.061,
+    'f200w': 0.064,
+    'f210m': 0.068,
+    'f212n': 0.069,
+    'f250m': 0.082,
+    'f277w': 0.088,
+    'f300m': 0.097,
+    'f322w2': 0.096,
+    'f323n': 0.106,
+    'f335m': 0.109,
+    'f356w': 0.114,
+    'f360m': 0.118,
+    'f405n': 0.132,
+    'f410m': 0.133,
+    'f430m': 0.139,
+    'f444w': 0.140,
+    'f460m': 0.151,
+    'f466n': 0.152,
+    'f470n': 0.154,
+    'f480m': 0.157,
+}
 
 def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None):
     randn = np.random.randint(0, 10000)
@@ -108,8 +143,9 @@ def _run_psfex(
         fwhm_min=1.5, 
         fwhm_max=4.0,
         max_ellip=0.1,
+        min_snr=8.0,
         psf_size=301,
-        checkplot_fwhm=False,
+        checkplots=False,
     ):
     """
     Run PSFEx on a catalog.
@@ -137,9 +173,9 @@ def _run_psfex(
         script.write(f'      -BASIS_NUMBER 20\ \n')
         script.write(f'      -PHOTFLUX_KEY "FLUX_APER(1)"\ \n')
         script.write(f'      -PHOTFLUXERR_KEY "FLUXERR_APER(1)"\ \n')
-        if checkplot_fwhm:
+        if checkplots:
             script.write(f'      -CHECKPLOT_TYPE SELECTION_FWHM\ \n')
-            script.write(f'      -CHECKPLOT_NAME {}\ \n')
+            script.write(f'      -CHECKPLOT_NAME {input_catalog}\ \n')
         script.write(f'      -OUTCAT_TYPE FITS_LDAC\ \n')
         script.write(f'      -OUTCAT_NAME {output_filename}.cat\ \n')
 
@@ -161,8 +197,14 @@ class PSF:
 
     @classmethod
     def build(cls, 
-        images: List[str], 
-        psf_size: int = 301,
+        images: List[Image],
+        output_file: str,  
+        fwhm_min: float,
+        fwhm_max: float,
+        max_ellip: float, 
+        min_snr: float,
+        checkplots: bool,
+        psf_size: int,
     ):
         """
         Build a PSF model from a list of images.
@@ -171,40 +213,53 @@ class PSF:
         if not psf_size % 2:
             raise ValueError('PSF size must be odd.')
         
+        final_catalog = output_file.replace('.fits', '_secat.fits')
         output_catalogs = []
         for image in images:
-            if not os.path.exists(image):
+            if not image.exists:
                 raise FileNotFoundError(f'{image} does not exist.')
-            
-            if '_i2d.fits' in image:
-                raise ValueError('Cannot build PSFs from i2d files (atm).')
 
-            elif '_sci.fits' in image:
-                weight_image = image.replace('_sci.fits', '_wht.fits')
-
-            output_cat = image.replace('_sci.fits', '_psfex_secat.fits')
+            output_cat = image.base_file + '_psf_secat.fits' 
             
             # Run SExtractor on the image
-            _run_se(image, weight_image, output_cat, psf_size, sex_install=None):
+            _run_se(image.sci_file, image.wht_file, output_cat, psf_size, sex_install=None)
 
             output_catalogs.append(output_cat)
 
         if len(output_catalogs) > 1:
             # Merge catalogs, if more than one
             # final_catalog = ...
-            # rename to remove tiling? 
             pass
         else:
-            final_catalog = output_catalogs[0]
+            os.rename(output_catalogs[0], final_catalog)
+
+        # Determine the image filter, relevant for setting fwhm_min, fwhm_max
+        filters = []
+        for image in images:
+            filters.append(image.filter)
+        if len(set(filters)) != 1:
+            raise ValueError('All images must be in the same filter!')
+        filt = filters[0]
+
+        # Determine the pixel scale for the image, relevant for setting fwhm_min, fwhm_max
+        pixel_scales = []
+        for image in images:
+            pixel_scales.append(image.pixel_scale)
+        if len(set(pixel_scales)) != 1:
+            raise ValueError('All images must have same pixel scale!')
+        pixel_scale = pixel_scales[0] # in arcsec
+
+        fwhm_min = nominal_psf_fwhms[filt] / pixel_scale * fwhm_min_scale
+        fwhm_max = nominal_psf_fwhms[filt] / pixel_scale * fwhm_max_scale
 
         # Run PSFEx on the final catalog
-        output_psf = final_catalog.replace('.fits', '_psf.fits')
-
-        _run_psfex(final_catalog, 
-            output_psf, 
+        _run_psfex(
+            final_catalog, 
+            output_file, 
             fwhm_min=fwhm_min,
             fwhm_max=fwhm_max,
             max_ellip=max_ellip,
+            min_snr=min_snr,
             checkplot_fwhm=checkplot_fwhm,
             psf_size=psf_size
         )
