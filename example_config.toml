@@ -59,7 +59,7 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
     max_ellip = 0.1 # Maximum ellipticity for star selection
     min_snr = 8.0 # Minimum SNR for star selection
     psf_size = 301 # PSF array size
-    output_checkimgs = true
+    checkplots = true
 
 
 [psf_homogenization]
