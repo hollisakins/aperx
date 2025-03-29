@@ -239,6 +239,14 @@ class PSF:
         
         if not psf_size % 2:
             raise ValueError('PSF size must be odd.')
+
+        # Determine the image filter, relevant for setting fwhm_min, fwhm_max
+        filters = []
+        for image in images:
+            filters.append(image.filter)
+        if len(set(filters)) != 1:
+            raise ValueError('All images must be in the same filter!')
+        filt = filters[0]
         
         final_catalog = output_file.replace('.fits', '_secat.fits')
         output_catalogs = []
@@ -266,13 +274,6 @@ class PSF:
         else:
             os.rename(output_catalogs[0], final_catalog)
 
-        # Determine the image filter, relevant for setting fwhm_min, fwhm_max
-        filters = []
-        for image in images:
-            filters.append(image.filter)
-        if len(set(filters)) != 1:
-            raise ValueError('All images must be in the same filter!')
-        filt = filters[0]
 
         # Determine the pixel scale for the image, relevant for setting fwhm_min, fwhm_max
         pixel_scales = []
