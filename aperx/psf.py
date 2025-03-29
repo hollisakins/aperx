@@ -118,7 +118,7 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
         script.write(f"-WEIGHT_TYPE MAP_WEIGHT ")
         script.write(f"-RESCALE_WEIGHTS Y ")
         script.write(f"-WEIGHT_GAIN N ")
-        script.write(f"-PHOT_APERTURES 15")
+        script.write(f"-PHOT_APERTURES 15 ")
         script.write(f"-PHOT_AUTOPARAMS 2.5,1.0 ")
         script.write(f"-PHOT_PETROPARAMS 2.0,1.0 ")
         script.write(f"-PHOT_AUTOAPERS 0.1,0.1 ")
