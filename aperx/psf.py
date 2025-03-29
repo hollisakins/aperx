@@ -1,7 +1,7 @@
 from .image import Image
 import os
 from typing import List
-
+import numpy as np
 
 nominal_psf_fwhms = {
     'f070w': 0.023,
@@ -158,29 +158,29 @@ def _run_psfex(
 
     with open(psfex_run_script_name, 'w') as script:
         script.write(f'psfex {input_catalog}\ \n') # /softs/astromatic/psfex/3.22.1/bin/psfex $SEcat
-        script.write(f'      -c /home/hakins/PSFEx/default.psfex\ \n')
-        script.write(f'      -PSF_SIZE {psf_size},{psf_size}\ \n')
-        script.write(f'      -PSFVAR_DEGREES 0\ \n')
-        script.write(f'      -PSFVAR_NSNAP 1\ \n')
-        script.write(f'      -PSF_SAMPLING 1.0\ \n')
-        script.write(f'      -PSF_RECENTER Y\ \n')
-        script.write(f'      -BASIS_TYPE PIXEL_AUTO\ \n')
-        script.write(f'      -PSF_SUFFIX ".psf"\ \n')
-        script.write(f'      -PSF_ACCURACY 0.01\ \n')
-        script.write(f'      -SAMPLEVAR_TYPE NONE\ \n')
-        script.write(f'      -SAMPLE_VARIABILITY 0.3\ \n')
-        script.write(f'      -SAMPLE_AUTOSELECT YES\ \n')
-        script.write(f'      -SAMPLE_FWHMRANGE {fwhm_min},{fwhm_max}\ \n')
-        script.write(f'      -SAMPLE_MINSN {min_snr}\ \n')
-        script.write(f'      -SAMPLE_MAXELLIP {max_ellip}\ \n')
-        script.write(f'      -BASIS_NUMBER 20\ \n')
-        script.write(f'      -PHOTFLUX_KEY "FLUX_APER(1)"\ \n')
-        script.write(f'      -PHOTFLUXERR_KEY "FLUXERR_APER(1)"\ \n')
+        script.write(f'      -c /home/hakins/PSFEx/default.psfex\\ \n')
+        script.write(f'      -PSF_SIZE {psf_size},{psf_size}\\ \n')
+        script.write(f'      -PSFVAR_DEGREES 0\\ \n')
+        script.write(f'      -PSFVAR_NSNAP 1\\ \n')
+        script.write(f'      -PSF_SAMPLING 1.0\\ \n')
+        script.write(f'      -PSF_RECENTER Y\\ \n')
+        script.write(f'      -BASIS_TYPE PIXEL_AUTO\\ \n')
+        script.write(f'      -PSF_SUFFIX ".psf"\\ \n')
+        script.write(f'      -PSF_ACCURACY 0.01\\ \n')
+        script.write(f'      -SAMPLEVAR_TYPE NONE\\ \n')
+        script.write(f'      -SAMPLE_VARIABILITY 0.3\\ \n')
+        script.write(f'      -SAMPLE_AUTOSELECT YES\\ \n')
+        script.write(f'      -SAMPLE_FWHMRANGE {fwhm_min},{fwhm_max}\\ \n')
+        script.write(f'      -SAMPLE_MINSN {min_snr}\\ \n')
+        script.write(f'      -SAMPLE_MAXELLIP {max_ellip}\\ \n')
+        script.write(f'      -BASIS_NUMBER 20\\ \n')
+        script.write(f'      -PHOTFLUX_KEY "FLUX_APER(1)"\\ \n')
+        script.write(f'      -PHOTFLUXERR_KEY "FLUXERR_APER(1)"\\ \n')
         if checkplots:
-            script.write(f'      -CHECKPLOT_TYPE SELECTION_FWHM\ \n')
-            script.write(f'      -CHECKPLOT_NAME {input_catalog}\ \n')
-        script.write(f'      -OUTCAT_TYPE FITS_LDAC\ \n')
-        script.write(f'      -OUTCAT_NAME {output_filename}.cat\ \n')
+            script.write(f'      -CHECKPLOT_TYPE SELECTION_FWHM\\ \n')
+            script.write(f'      -CHECKPLOT_NAME {input_catalog}\\ \n')
+        script.write(f'      -OUTCAT_TYPE FITS_LDAC\\ \n')
+        script.write(f'      -OUTCAT_NAME {output_filename}.cat\\ \n')
 
 
     subprocess.run(psfex_run_script)
