@@ -233,6 +233,7 @@ class PSF:
         final_catalog = output_file.replace('.fits', '_secat.fits')
         output_catalogs = []
         for image in images:
+            print(image)
             if not image.exists:
                 raise FileNotFoundError(f'{image} does not exist.')
 
@@ -242,6 +243,8 @@ class PSF:
             _run_se(image.sci_file, image.wht_file, output_cat, psf_size, sex_install=None)
 
             output_catalogs.append(output_cat)
+
+        quit()
 
         if len(output_catalogs) > 1:
             # Merge catalogs, if more than one
