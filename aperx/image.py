@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy.optimize import curve_fit
 from photutils.aperture import SkyCircularAperture, aperture_photometry
-
+from typing import Tuple
 
 
 @dataclass
@@ -24,15 +24,15 @@ class Image:
     psf_file: str = None
     psfmatched_file: str = None
 
-    _sci = field(init=False, repr=False, default=None)
-    _err = field(init=False, repr=False, default=None)
-    _wht = field(init=False, repr=False, default=None)
-    _hdr = field(init=False, repr=False, default=None)
-    _wcs = field(init=False, repr=False, default=None)
-    _pixel_scale = field(init=False, repr=False, default=None)
-    _shape = field(init=False, repr=False, default=None)
-    _psf = field(init=False, repr=False, default=None)
-    _psfmatched = field(init=False, repr=False, default=None)
+    _sci : np.ndarray = field(init=False, repr=False, default=None)
+    _err : np.ndarray = field(init=False, repr=False, default=None)
+    _wht : np.ndarray = field(init=False, repr=False, default=None)
+    _hdr : np.ndarray = field(init=False, repr=False, default=None)
+    _wcs : np.ndarray = field(init=False, repr=False, default=None)
+    _pixel_scale : float = field(init=False, repr=False, default=None)
+    _shape : Tuple[int,int] = field(init=False, repr=False, default=None)
+    _psf : np.ndarray = field(init=False, repr=False, default=None)
+    _psfmatched : np.ndarray = field(init=False, repr=False, default=None)
 
     @property 
     def base_file(self):
