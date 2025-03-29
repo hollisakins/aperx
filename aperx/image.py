@@ -5,6 +5,16 @@ import sys, os, warnings
 import numpy as np
 from dataclasses import dataclass, field
 
+# import warnings
+# warnings.simplefilter('ignore')
+import tqdm
+import astropy.units as u
+import matplotlib.pyplot as plt
+from astropy.io import fits
+from scipy.optimize import curve_fit
+from photutils.aperture import SkyCircularAperture, aperture_photometry
+
+
 
 @dataclass
 class Image:
@@ -80,6 +90,30 @@ class Image:
             self._wht = wht_image
         return self._wht
 
+    @property
+    def psf(self):
+        """
+        Load the PSF for the given band.
+        """
+        if not self.has_psf:
+            raise FileNotFoundError(f"PSF file not found: {self.psf_file}")
+        if self._psf is None:
+            self._psf = PSF(self.psf_file)
+        return self._psf
+
+    @property
+    def psfmatched(self):
+        """
+        Load the psfmatched science image for the given band using memory mapping.
+        """
+        if not self.has_psfmatched_equivalent:
+            raise FileNotFoundError(f"PSF-matched file not found: {self.psfmatched_file}")
+        if self._psfmatched is None:
+            with fits.open(self.psfmatched_file, memmap=True) as hdul:
+                psfmatched_image = hdul['SCI'].data
+            self._psfmatched = psfmatched_image
+        return self._psfmatched
+
     def close(self):
         """
         Force close all memmapped arrays
@@ -116,3 +150,81 @@ class Image:
 
     def __repr__(self):
         return f"Image({os.path.basename(self.base_file)})"
+
+
+
+    def generate_psfmatched_image(self, target_filter, target_psf_file, overwrite=False):
+        """
+        Convolve the science image with the PSF and save the result to a new file.
+        """
+        if not self.has_psf:
+            raise FileNotFoundError(f"PSF file not found: {self.psf_file}")
+
+        if os.path.exists(self.psfmatched_file) and not overwrite:
+            print('PSF matched file already exists, use overwrite=True to regenerate.')
+            return
+
+        kernel_file = self.psf_file.replace('.fits', f'_kernel_to_{target_filter}.fits')
+        kernel_log_file = kernel_file.replace('.fits', '.log')
+        cmd = f"""
+            pypher {self.psf_file} {target_psf_file} {kernel_file}
+        """
+        # TODO add some regularization? 
+        subprocess.run(cmd, shell=True)
+
+        kernel = fits.getdata(kernel_file)
+        convolved = convolve_fft(self.sci, kernel, normalize_kernel=False)
+        hdu = fits.PrimaryHDU(convolved, header=self.hdr)
+        hdul = fits.HDUList([hdu])
+        hdul.writeto(self.psfmatched_file, overwrite=True)
+
+        os.remove(kernel_file)
+        os.remove(kernel_log_file)
+        del hdu, hdul, convolved, kernel
+
+    @property
+    def area(self):
+        """
+        On-sky area covered this image, in square arcmin
+        """
+        return np.prod(self.shape) * self.pixel_scale**2 / 3600 # in sq. arcmin
+
+
+
+    def get_random_aperture_fluxes(
+        aperture_diameters: np.ndarray,
+        num_apertures_per_sq_arcmin: int,
+        source_mask,
+        psfmatched = False,
+    ):
+        
+        num_apertures = int(num_apertures_per_sq_arcmin * self.area)
+
+        num_diameters = len(aperture_diameters)
+        flux = np.zeros((num_apertures,num_diameters,))
+
+        if psfmatched: 
+            nsci = self.psfmatched * np.sqrt(self.wht)
+        else:
+            nsci = self.sci * np.sqrt(self.wht)
+
+        x, y = np.arange(np.shape(nsci)[1]), np.arange(np.shape(nsci)[0])
+        x, y = np.meshgrid(x, y)
+        x, y = x.flatten(), y.flatten()
+        mask = ~source_mask & np.isfinite(nsci.flatten())
+        x, y = x[mask], y[mask]
+        i = np.random.randint(low=0,high=len(x),size=num_apertures)
+        x, y = x[i], y[i]
+        centroids = wcs.pixel_to_world(x, y)
+
+        for i in range(num_diameters):
+            d = aperture_diameters[i]*u.arcsec
+            aperture = SkyCircularAperture(centroids, r=d/2)
+            tbl = aperture_photometry(nsci, aperture, mask=mask, wcs=wcs)
+            flux[:,i] = np.array(tbl['aperture_sum'],dtype=float)
+
+        return flux
+
+
+
+

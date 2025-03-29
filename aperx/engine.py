@@ -29,9 +29,10 @@ def main():
     cat = Catalog(config)
 
 
-    logger = utils.setup_logger()
+    base_logger = utils.setup_logger(name='aperx')
 
     if config.psf_generation.run: 
+        step_logger = utils.setup_logger(name='aperx.psf_generation')
         if cat.all_psfs_exist:
             logger.warning('All necessary PSFs exist already, no need to generate?')
         
@@ -44,7 +45,25 @@ def main():
 
     if config.psf_homogenization.run:
         # homogenize PSFs
-        pass
+        target_filter = config.psf_homogenization.target_filter 
+        overwrite = config.psf_homogenization.overwrite 
+
+        if target_filter not in config.filters:
+            raise ValueError(f'PSF homogenization: target filter must be in {config.fitlers}')
+
+        target_images = cat.get_images(filt=target_filter)
+        psf_files = [image.psf_file for image in target_images]
+        if len(set(psf_files)) != 1:
+            raise ValueError('Target filter has differnt PSF files, something went awry')
+        target_psf_file = psf_files[0]
+
+        
+        for image in cat.images:
+            image.generate_psfmatched_image(
+                target_filter = target_filter,
+                target_psf_file = target_psf_file, 
+                overwrite = overwrite
+            )
 
     if config.source_detection.run: 
         pass

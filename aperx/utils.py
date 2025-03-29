@@ -13,9 +13,13 @@ n_procs       = int(multiprocessing.cpu_count()/2)
 sw_filters = ['f070w','f090w','f115w','f140m','f150w','f162m','f164n','f150w2','f182m','f187n','f200w','f210m','f212n']
 lw_filters = ['f250m','f277w','f300m','f322w2','f323n','f335m','f356w','f360m','f405n','f410m','f430m','f444w','f460m','f466n','f470n','f480m']
 
-def setup_logger():
-    log = logging.getLogger(__name__)
-    log.setLevel(logging.DEBUG)
+def setup_logger(name=None, level=logging.DEBUG): # TODO replace with rich logger? 
+    if name is None:
+        name = __name__
+    
+    log = logging.getLogger(name)
+    log.setLevel(level)
+
     return log
 
 def parse_config_file(config_file):

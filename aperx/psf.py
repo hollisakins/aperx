@@ -190,10 +190,25 @@ def _run_psfex(
 
 class PSF:
 
-    @classmethod
-    def load(cls, filepath):
-        psf = fits.open(filepath)[1].data['PSF_MASK'][0][0]
-        return cls(psf)
+    def __init__(self, filepath):
+
+        if not filepath.endswith('.fits'):
+            raise ValueError('PSF file must be a FITS file.')
+
+        self.data = fits.getdata(filepath)
+
+
+    def derive_aperture_correction(self, aperture_radius: float):
+        """
+        Derive the aperture correction for the PSF.
+        """
+        pass
+
+    def plot(self):
+        """
+        Plot the PSF.
+        """
+        pass
 
     @classmethod
     def build(cls, 
@@ -279,7 +294,7 @@ class PSF:
         fits.writeto(output_psf.replace('.psf','.fits'), data=psf, header=new_wcs.to_header(), overwrite=True)
 
         # Remove extraneous files
-        
+
 
 
         return cls(...)

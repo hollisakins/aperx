@@ -65,6 +65,7 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 [psf_homogenization]
     run = true
     target_filter = 'f444w'
+    overwrite = false
 
 
 [source_detection]
@@ -122,7 +123,7 @@ scheme = 'single'
         min_radius = 0.15
         max_radius = 1.5
         num_radii = 30
-        num_apertures = 10000
+        num_apertures_per_sq_arcmin = 80
         checkplots = true
 
     [post_processing.psf_corrections]

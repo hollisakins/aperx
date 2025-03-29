@@ -197,6 +197,21 @@ class Catalog:
     def get_auto_photometry(self):
         pass
 
+    def get_images(filt=None, tile=None):
+        """
+        Get a list of images corresponding to a given filter or tile (but not both, that's pointless). 
+        """
+        if filt is not None and tile is not None:
+            raise ValueError('get_images should be used separately for filters/tiles')
+        
+        elif filt is not None:
+            return list(self.images_flipped[filt].values())
+        
+        elif tile is not None:
+            return list(self.images[tile].values())
+        else:
+            raise ValueError('get_images: must specify filter or tile')
+
 
     def generate_psfs(self, psf_size, overwrite=False):
 
@@ -213,19 +228,17 @@ class Catalog:
                 print(f'PSF for {filt} already exists, skipping generation')
                 continue
 
-            # Build PSFs
-            print(images)
-            from .psf import PSF
-            PSF.build(
-                images,
-                psf_file,
-                psf_size,
-            )
-
-        
-
-        pass
-    # def generate_psfs(self):
+            for image in images:
+                print(image)
+            print(psf_file)
+            # # Build PSFs
+            # print(images)
+            # from .psf import PSF
+            # PSF.build(
+            #     images,
+            #     psf_file,
+            #     psf_size,
+            # )
 
 
     def _build_chisq_detection_image(
@@ -307,3 +320,74 @@ class Catalog:
         return chi_mean
 
     
+
+
+
+    def measure_random_aperture_scaling(filt, 
+        min_radius: float, 
+        max_radius: float, 
+        num_radii: int,
+        num_apertures_per_sq_arcmin: int,
+        plot: bool = False,
+    ):
+        aperture_diameters = np.linspace(min_radius, max_radius, num_radii) * 2 # in arcsec
+
+        images = self.get_images(filt=filt)
+        num_apertures_total = [int(num_apertures_per_sq_arcmin * image.area) for image in images].sum()
+        fluxes = np.zeros((num_apertures_total, num_radii))
+
+        i = 0
+        for image in images:
+            flux = image.get_random_aperture_fluxes(
+                aperture_diameters,
+                num_apertures_per_sq_arcmin,
+                source_mask=image.srcmask,
+            )
+            N = np.shape(flux)[0]
+            fluxes[i:i+N, :] = flux
+            i += N
+
+
+        for i in tqdm.tqdm(range(num_radii)):
+            f = fluxes[:,i]
+            mu, sigma = _fit_pixel_distribution(f, sigma_upper=1.0, maxiters=3)
+            rmsN[i] = sigma
+
+        N = np.pi*(aperture_diameters/2/0.03)**2
+
+        def func(x, alpha, beta):
+            return alpha*np.power(x,beta) 
+        popt, pcov = curve_fit(func, np.sqrt(N), rmsN/rms1, p0=[1,1.5], maxfev=int(1e5))
+        alpha,beta = popt
+
+
+        fig, ax = plt.subplots(figsize=(3.5,3))
+        ax.scatter(np.sqrt(N), rmsN/rms1, color='k', linewidths=1, marker='x', s=35, zorder=1000)
+        ax.scatter(np.sqrt(N), rmsN/rms1, color='k', linewidths=1, marker='+', s=50, zorder=1000)
+        x = np.linspace(0, 30, 1000)
+        y = func(x,*popt)
+        ax.plot(x, y, color='b')
+        ax.plot(x, alpha*x, color='k', linestyle='--')
+        ax.plot(x, alpha*x**2, color='k', linestyle='-.')
+
+
+        ax.set_ylim(0, 1.3*np.max(rmsN/rms1))
+        ax.set_xlim(0, 30)
+        ax.set_xlabel(r'$\sqrt{N_{\rm pix}}$')
+        ax.set_ylabel(r'$\sigma_N/\sigma_1$')
+
+
+        if band=='f814w':
+            photflam, photplam = 6.99715969242424E-20, 8047.468423484849
+            conversion = 3.33564e13 * (photplam)**2 * photflam
+        else:
+            conversion = 1e15*((0.03*u.arcsec)**2).to(u.sr).value # MJy/sr to nJy/pix
+            
+        ax.annotate(f'A1-B10 {band.upper()}' + '\n' + fr'$\sigma_1/$nJy  $= {rms1*conversion:.2f}$' + '\n' + fr'$\alpha = {alpha:.3f}$' + '\n' + fr'$\beta = {beta:.3f}$', (0.05,0.95),xycoords='axes fraction', ha='left', va='top')
+        # ax.annotate(f'{tile} {band.upper()}' + '\n' + fr'$\alpha = {alpha:.3f}$' + '\n' + fr'$\beta = {beta:.3f}$'+ '\n' + fr'$\gamma = {gamma:.3f}$' + '\n' + fr'$\delta = {delta:.3f}$', (0.05,0.95),xycoords='axes fraction', ha='left', va='top')
+
+        if not psfMatched or band in ['f444w','f770w']:
+            plt.savefig(f'/Dropbox/research/COSMOS-Web/catalog/checkplots/randomApertures_{band}.pdf')
+        else:
+            plt.savefig(f'/Dropbox/research/COSMOS-Web/catalog/checkplots/randomApertures_{band}_psfMatched.pdf')
+        plt.close()
