@@ -2,6 +2,7 @@ from .image import Image
 import os
 from typing import List
 import numpy as np
+import subprocess
 
 nominal_psf_fwhms = {
     'f070w': 0.023,
