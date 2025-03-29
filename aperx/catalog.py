@@ -213,7 +213,16 @@ class Catalog:
             raise ValueError('get_images: must specify filter or tile')
 
 
-    def generate_psfs(self, psf_size, overwrite=False):
+    def generate_psfs(self, 
+        psfex_install: str = 'psfex', # path to PSFEx installation
+        fwhm_min_scale: float = 0.75, # minimum FWHM scale for PSF generation
+        fwhm_max_scale: float = 1.75, # maximum FWHM scale for PSF generation
+        max_ellip: float = 0.1, # maximum ellipticity for PSF generation
+        min_snr: float = 8.0, # minimum SNR for PSF generation
+        psf_size: int = 301, # size of PSF image, should be odd
+        checkplots: bool = False, # whether to generate checkplots during PSF generation
+        overwrite: bool = False, # whether to overwrite existing PSF files
+    ):
 
         for filt in self.filters:
             images = list(self.images_flipped[filt].values())
@@ -227,18 +236,19 @@ class Catalog:
             if os.path.exists(psf_file) and not overwrite:
                 print(f'PSF for {filt} already exists, skipping generation')
                 continue
-
-            for image in images:
-                print(image)
-            print(psf_file)
-            # # Build PSFs
-            # print(images)
-            # from .psf import PSF
-            # PSF.build(
-            #     images,
-            #     psf_file,
-            #     psf_size,
-            # )
+            
+            # Build PSFs
+            from .psf import PSF
+            PSF.build(
+                images,
+                psf_file,
+                fwhm_min_scale,
+                fwhm_max_scale,
+                max_ellip, 
+                min_snr,
+                checkplots,
+                psf_size,
+            )
 
 
     def _build_chisq_detection_image(

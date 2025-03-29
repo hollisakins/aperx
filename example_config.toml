@@ -63,7 +63,7 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 
 
 [psf_homogenization]
-    run = true
+    run = false
     target_filter = 'f444w'
     overwrite = false
 

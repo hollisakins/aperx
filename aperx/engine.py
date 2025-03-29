@@ -36,12 +36,16 @@ def main():
         if cat.all_psfs_exist:
             logger.warning('All necessary PSFs exist already, no need to generate?')
         
-        psf_size = config.psf_generation.psf_size
-        overwrite = config.psf_generation.overwrite
-        
         cat.generate_psfs(
-            psf_size=psf_size, 
-            overwrite=overwrite)
+            psfex_install = config.psf_generation.psfex_install,
+            fwhm_min_scale = config.psf_generation.fwhm_min_scale,
+            fwhm_max_scale = config.psf_generation.fwhm_max_scale,
+            max_ellip = config.psf_generation.max_ellip,
+            min_snr = config.psf_generation.min_snr,
+            psf_size = config.psf_generation.psf_size,
+            checkplots = config.psf_generation.checkplots,
+            overwrite = config.psf_generation.overwrite,
+        )
 
     if config.psf_homogenization.run:
         # homogenize PSFs
