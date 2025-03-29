@@ -21,6 +21,7 @@ class Image:
     sci_file: str
     err_file: str
     wht_file: str
+    filter: str
     psf_file: str = None
     psfmatched_file: str = None
 
@@ -31,7 +32,6 @@ class Image:
     _wcs : np.ndarray = field(init=False, repr=False, default=None)
     _pixel_scale : float = field(init=False, repr=False, default=None)
     _shape : Tuple[int,int] = field(init=False, repr=False, default=None)
-    _filter : str = field(init=False, repr=False, default=None)
     _psf : np.ndarray = field(init=False, repr=False, default=None)
     _psfmatched : np.ndarray = field(init=False, repr=False, default=None)
 
@@ -149,12 +149,6 @@ class Image:
             self._shape = shape
         return self._shape
 
-    @property
-    def filter(self):
-        if self._filter is None:
-            filt = self.hdr['FILTER'].lower() if 'FILTER' in self.hdr else None
-            self._filter = filt
-        return self._filter
 
     def __repr__(self):
         return f"Image({os.path.basename(self.base_file)})"

@@ -146,6 +146,7 @@ class Catalog:
 
                     # Add to images dictionary
                     images[tile][filt] = Image(
+                        filter=filt,
                         sci_file=sci_file, 
                         err_file=err_file, 
                         wht_file=wht_file, 
