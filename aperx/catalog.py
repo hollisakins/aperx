@@ -197,7 +197,7 @@ class Catalog:
     def get_auto_photometry(self):
         pass
 
-    def get_images(filt=None, tile=None):
+    def get_images(self, filt=None, tile=None):
         """
         Get a list of images corresponding to a given filter or tile (but not both, that's pointless). 
         """
