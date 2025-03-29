@@ -36,9 +36,8 @@ nominal_psf_fwhms = {
 }
 
 def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None):
-    randn = np.random.randint(0, 10000)
-    param_file = os.path.join(config.temp_path, f'psfex_cat_{randn}.param')
-    se_run_script = os.path.join(config.temp_path, f'se_run_script_{randn}.sh')
+    param_file = output_cat.replace('.fits', f'.param')
+    se_run_script = output_cat.replace('.fits', f'_se_run_script.sh')
 
     with open(param_file, 'w') as param:
         param.write('NUMBER\n')
