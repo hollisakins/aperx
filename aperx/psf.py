@@ -136,7 +136,7 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
 
     subprocess.run(['bash', se_run_script])
 
-    os.remove(param_file)
+    # os.remove(param_file)
     # os.remove(se_run_script)
 
 
