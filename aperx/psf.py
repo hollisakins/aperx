@@ -100,7 +100,7 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
     
     with open(se_run_script, 'w') as script:
         script.write('') #...
-        script.write(f'{sex_install} {detec_image},{detec_image} ')
+        script.write(f'{sex_install} {detec_image} ')
         script.write(f'-CATALOG_NAME {output_cat} ')
         script.write(f'-CATALOG_TYPE FITS_LDAC ')
         script.write(f'-PARAMETERS_NAME {param_file} ')
@@ -114,7 +114,7 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
         script.write(f'-CLEAN Y ')
         script.write(f'-CLEAN_PARAM 1.0 ')
         script.write(f'-MASK_TYPE CORRECT ')
-        script.write(f'-WEIGHT_IMAGE {weight_image},{weight_image} ')
+        script.write(f'-WEIGHT_IMAGE {weight_image} ')
         script.write(f'-WEIGHT_TYPE MAP_WEIGHT,MAP_WEIGHT ')
         script.write(f'-RESCALE_WEIGHTS Y ')
         script.write(f'-WEIGHT_GAIN N ')
