@@ -36,7 +36,14 @@ nominal_psf_fwhms = {
     'f480m': 0.157,
 }
 
-def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None):
+def _run_se(
+        detec_image, 
+        weight_image, 
+        output_cat, 
+        vignet_size, 
+        seeing_fwhm=0.1,  # in arcseconds, default seeing FWHM
+        sex_install=None
+    ):
     param_file = output_cat.replace('.fits', f'.param')
     se_run_script = output_cat.replace('.fits', f'.sh')
 
@@ -133,6 +140,8 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
         script.write(f"-BACKPHOTO_TYPE LOCAL ")
         script.write(f"-BACKPHOTO_THICK 64 ")
         script.write(f"-BACK_FILTTHRESH 0.0 ")
+        script.write(f"-SEEING_FWHM {seeing_fwhm} ")
+        script.write(f"-STARNNW_NAME /home/hakins/PSFEx/default.nnw ")
 
     subprocess.run(['bash', se_run_script])
 
@@ -241,7 +250,10 @@ class PSF:
             output_cat = image.base_file + 'psf_secat.fits' 
             
             # Run SExtractor on the image
-            _run_se(image.sci_file, image.wht_file, output_cat, psf_size, sex_install=None)
+            _run_se(image.sci_file, image.wht_file, output_cat, psf_size, 
+                seeing_fwhm = nominal_psf_fwhms[filt],  # Use the nominal PSF FWHM for the filter
+                sex_install=None
+            )
 
             output_catalogs.append(output_cat)
 
