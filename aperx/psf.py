@@ -38,7 +38,7 @@ nominal_psf_fwhms = {
 
 def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None):
     param_file = output_cat.replace('.fits', f'.param')
-    se_run_script = output_cat.replace('.fits', f'_se_run_script.sh')
+    se_run_script = output_cat.replace('.fits', f'.sh')
 
     with open(param_file, 'w') as param:
         param.write('NUMBER\n')
@@ -134,7 +134,7 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
         script.write(f'    -BACKPHOTO_THICK 64\\ \n')
         script.write(f'    -BACK_FILTTHRESH 0.0\\ \n')
 
-    subprocess.run(se_run_script)
+    subprocess.run(f'bash {se_run_script}')
 
     os.remove(param_file)
     os.remove(se_run_script)
@@ -154,7 +154,7 @@ def _run_psfex(
     Run PSFEx on a catalog.
     """
     randn = np.random.randint(0, 10000)
-    psfex_run_script = os.path.join(config.temp_path, f'psfex_run_script_{randn}.sh')
+    # psfex_run_script = os.path.join(config.temp_path, f'psfex_run_script_{randn}.sh')
 
     with open(psfex_run_script_name, 'w') as script:
         script.write(f'psfex {input_catalog}\\ \n') # /softs/astromatic/psfex/3.22.1/bin/psfex $SEcat
@@ -183,7 +183,7 @@ def _run_psfex(
         script.write(f'      -OUTCAT_NAME {output_filename}.cat\\ \n')
 
 
-    subprocess.run(psfex_run_script)
+    subprocess.run(f'bash {psfex_run_script}')
 
     os.remove(input_catalog)
     os.remove(outcat)
@@ -238,7 +238,7 @@ class PSF:
             if not image.exists:
                 raise FileNotFoundError(f'{image} does not exist.')
 
-            output_cat = image.base_file + '_psf_secat.fits' 
+            output_cat = image.base_file + 'psf_secat.fits' 
             
             # Run SExtractor on the image
             _run_se(image.sci_file, image.wht_file, output_cat, psf_size, sex_install=None)
