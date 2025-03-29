@@ -1,5 +1,6 @@
 from .image import Image
 import os
+from typing import List
 
 
 nominal_psf_fwhms = {
@@ -95,41 +96,43 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
     if sex_install is None:
         sex_install = 'sex'
     
+    print(f'SE run script {se_run_script}')
+    
     with open(se_run_script, 'w') as script:
         script.write('') #...
-        script.write(f'{sex_install} {detec_image},{detec_image}\ \n')
-        script.write(f'    -CATALOG_NAME {output_cat}\ \n')
-        script.write(f'    -CATALOG_TYPE FITS_LDAC\ \n')
-        script.write(f'    -PARAMETERS_NAME {param_file}\ \n')
-        script.write(f'    -DETECT_MINAREA 8\ \n')
-        script.write(f'    -DETECT_THRESH 3.0\ \n')
-        script.write(f'    -ANALYSIS_THRESH 2.5\ \n')
-        script.write(f'    -FILTER Y\ \n')
-        script.write(f'    -FILTER_NAME /home/hakins/COSMOS-Web/se++/conv/gauss_5.0_9x9.conv\ \n')
-        script.write(f'    -DEBLEND_NTHRESH 32\ \n')
-        script.write(f'    -DEBLEND_MINCONT 0.001\ \n')
-        script.write(f'    -CLEAN Y\ \n')
-        script.write(f'    -CLEAN_PARAM 1.0\ \n')
-        script.write(f'    -MASK_TYPE CORRECT\ \n')
-        script.write(f'    -WEIGHT_IMAGE {weight_image},{weight_image}\ \n')
-        script.write(f'    -WEIGHT_TYPE MAP_WEIGHT,MAP_WEIGHT\ \n')
-        script.write(f'    -RESCALE_WEIGHTS Y\ \n')
-        script.write(f'    -WEIGHT_GAIN N\ \n')
-        script.write(f'    -PHOT_APERTURES 150\ \n')
-        script.write(f'    -PHOT_AUTOPARAMS 2.5, 1.0\ \n')
-        script.write(f'    -PHOT_PETROPARAMS 2.0, 1.0\ \n')
-        script.write(f'    -PHOT_AUTOAPERS 0.1, 0.1\ \n')
-        script.write(f'    -PHOT_FLUXFRAC 0.5\ \n')
-        script.write(f'    -MAG_ZEROPOINT 28.9\ \n')
-        script.write(f'    -GAIN 1.0\ \n')
-        script.write(f'    -PIXEL_SCALE 0\ \n')
-        script.write(f'    -SEEING_FWHM 0.1\ \n')
-        scripts.write(f'   -BACK_TYPE AUTO\ \n')
-        scripts.write(f'   -BACK_SIZE 256\ \n')
-        scripts.write(f'   -BACK_FILTERSIZE 3\ \n')
-        scripts.write(f'   -BACKPHOTO_TYPE LOCAL\ \n')
-        scripts.write(f'   -BACKPHOTO_THICK 64\ \n')
-        scripts.write(f'   -BACK_FILTTHRESH 0.0\ \n')
+        script.write(f'{sex_install} {detec_image},{detec_image}\\ \n')
+        script.write(f'    -CATALOG_NAME {output_cat}\\ \n')
+        script.write(f'    -CATALOG_TYPE FITS_LDAC\\ \n')
+        script.write(f'    -PARAMETERS_NAME {param_file}\\ \n')
+        script.write(f'    -DETECT_MINAREA 8\\ \n')
+        script.write(f'    -DETECT_THRESH 3.0\\ \n')
+        script.write(f'    -ANALYSIS_THRESH 2.5\\ \n')
+        script.write(f'    -FILTER Y\\ \n')
+        script.write(f'    -FILTER_NAME /home/hakins/COSMOS-Web/se++/conv/gauss_5.0_9x9.conv\\ \n')
+        script.write(f'    -DEBLEND_NTHRESH 32\\ \n')
+        script.write(f'    -DEBLEND_MINCONT 0.001\\ \n')
+        script.write(f'    -CLEAN Y\\ \n')
+        script.write(f'    -CLEAN_PARAM 1.0\\ \n')
+        script.write(f'    -MASK_TYPE CORRECT\\ \n')
+        script.write(f'    -WEIGHT_IMAGE {weight_image},{weight_image}\\ \n')
+        script.write(f'    -WEIGHT_TYPE MAP_WEIGHT,MAP_WEIGHT\\ \n')
+        script.write(f'    -RESCALE_WEIGHTS Y\\ \n')
+        script.write(f'    -WEIGHT_GAIN N\\ \n')
+        script.write(f'    -PHOT_APERTURES 150\\ \n')
+        script.write(f'    -PHOT_AUTOPARAMS 2.5, 1.0\\ \n')
+        script.write(f'    -PHOT_PETROPARAMS 2.0, 1.0\\ \n')
+        script.write(f'    -PHOT_AUTOAPERS 0.1, 0.1\\ \n')
+        script.write(f'    -PHOT_FLUXFRAC 0.5\\ \n')
+        script.write(f'    -MAG_ZEROPOINT 28.9\\ \n')
+        script.write(f'    -GAIN 1.0\\ \n')
+        script.write(f'    -PIXEL_SCALE 0\\ \n')
+        script.write(f'    -SEEING_FWHM 0.1\\ \n')
+        scripts.write(f'   -BACK_TYPE AUTO\\ \n')
+        scripts.write(f'   -BACK_SIZE 256\\ \n')
+        scripts.write(f'   -BACK_FILTERSIZE 3\\ \n')
+        scripts.write(f'   -BACKPHOTO_TYPE LOCAL\\ \n')
+        scripts.write(f'   -BACKPHOTO_THICK 64\\ \n')
+        scripts.write(f'   -BACK_FILTTHRESH 0.0\\ \n')
 
     subprocess.run(se_run_script)
 
