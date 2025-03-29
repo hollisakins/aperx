@@ -126,12 +126,12 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
         script.write(f'    -GAIN 1.0\\ \n')
         script.write(f'    -PIXEL_SCALE 0\\ \n')
         script.write(f'    -SEEING_FWHM 0.1\\ \n')
-        scripts.write(f'   -BACK_TYPE AUTO\\ \n')
-        scripts.write(f'   -BACK_SIZE 256\\ \n')
-        scripts.write(f'   -BACK_FILTERSIZE 3\\ \n')
-        scripts.write(f'   -BACKPHOTO_TYPE LOCAL\\ \n')
-        scripts.write(f'   -BACKPHOTO_THICK 64\\ \n')
-        scripts.write(f'   -BACK_FILTTHRESH 0.0\\ \n')
+        script.write(f'    -BACK_TYPE AUTO\\ \n')
+        script.write(f'    -BACK_SIZE 256\\ \n')
+        script.write(f'    -BACK_FILTERSIZE 3\\ \n')
+        script.write(f'    -BACKPHOTO_TYPE LOCAL\\ \n')
+        script.write(f'    -BACKPHOTO_THICK 64\\ \n')
+        script.write(f'    -BACK_FILTTHRESH 0.0\\ \n')
 
     subprocess.run(se_run_script)
 
@@ -156,7 +156,7 @@ def _run_psfex(
     psfex_run_script = os.path.join(config.temp_path, f'psfex_run_script_{randn}.sh')
 
     with open(psfex_run_script_name, 'w') as script:
-        script.write(f'psfex {input_catalog}\ \n') # /softs/astromatic/psfex/3.22.1/bin/psfex $SEcat
+        script.write(f'psfex {input_catalog}\\ \n') # /softs/astromatic/psfex/3.22.1/bin/psfex $SEcat
         script.write(f'      -c /home/hakins/PSFEx/default.psfex\\ \n')
         script.write(f'      -PSF_SIZE {psf_size},{psf_size}\\ \n')
         script.write(f'      -PSFVAR_DEGREES 0\\ \n')
