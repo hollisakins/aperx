@@ -134,7 +134,7 @@ def _run_se(detec_image, weight_image, output_cat, vignet_size, sex_install=None
         script.write(f'    -BACKPHOTO_THICK 64\\ \n')
         script.write(f'    -BACK_FILTTHRESH 0.0\\ \n')
 
-    subprocess.run(f'bash {se_run_script}')
+    subprocess.run(['bash', se_run_script])
 
     os.remove(param_file)
     os.remove(se_run_script)
@@ -183,7 +183,7 @@ def _run_psfex(
         script.write(f'      -OUTCAT_NAME {output_filename}.cat\\ \n')
 
 
-    subprocess.run(f'bash {psfex_run_script}')
+    subprocess.run(['bash', psfex_run_script])
 
     os.remove(input_catalog)
     os.remove(outcat)
