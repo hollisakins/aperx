@@ -51,7 +51,6 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 
 [psf_generation]
     run = true # Run PSF generation with PSFEx? 
-    split_by_tile = false # Split by tile? Usually false
     overwrite = false
     psfex_install = '/softs/astromatic/psfex/3.22.1/bin/psfex' # <-- change!
     fwhm_min_scale = 0.75  # Minimum FWHM for star selection, scale factor from nominal PSF FWHM
