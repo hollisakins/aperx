@@ -45,6 +45,8 @@ def main():
             psf_size = config.psf_generation.psf_size,
             checkplots = config.psf_generation.checkplots,
             overwrite = config.psf_generation.overwrite,
+            psfex_install = config.psf_generation.psfex_install,
+            sex_install = config.psf_generation.sex_install,
         )
 
     if config.psf_homogenization.run:

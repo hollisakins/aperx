@@ -216,6 +216,7 @@ class Catalog:
 
     def generate_psfs(self, 
         psfex_install: str = 'psfex', # path to PSFEx installation
+        se_install: str = 'sex', # path to SExtractor installation
         fwhm_min_scale: float = 0.75, # minimum FWHM scale for PSF generation
         fwhm_max_scale: float = 1.75, # maximum FWHM scale for PSF generation
         max_ellip: float = 0.1, # maximum ellipticity for PSF generation

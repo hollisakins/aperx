@@ -42,7 +42,7 @@ def _run_se(
         output_cat, 
         vignet_size, 
         seeing_fwhm=0.1,  # in arcseconds, default seeing FWHM
-        sex_install=None
+        sex_install='sex',
     ):
     param_file = output_cat.replace('.fits', f'.param')
     se_run_script = output_cat.replace('.fits', f'.sh')
@@ -100,9 +100,6 @@ def _run_se(
         param.write('SNR_WIN\n')
         param.write(f'VIGNET({vignet_size},{vignet_size})\n')
     
-    if sex_install is None:
-        sex_install = 'sex'
-    
     print(f'SE run script {se_run_script}')
     
     with open(se_run_script, 'w') as script:
@@ -158,6 +155,7 @@ def _run_psfex(
         min_snr=8.0,
         psf_size=301,
         checkplots=False,
+        psfex_install='psfex',
     ):
     """
     Run PSFEx on a catalog.
@@ -166,7 +164,7 @@ def _run_psfex(
     # psfex_run_script = os.path.join(config.temp_path, f'psfex_run_script_{randn}.sh')
 
     with open(psfex_run_script_name, 'w') as script:
-        script.write(f'psfex {input_catalog}') # /softs/astromatic/psfex/3.22.1/bin/psfex $SEcat
+        script.write(f'{psfex_install} {input_catalog}') # /softs/astromatic/psfex/3.22.1/bin/psfex $SEcat
         script.write(f'      -c /home/hakins/PSFEx/default.psfex')
         script.write(f'      -PSF_SIZE {psf_size},{psf_size}')
         script.write(f'      -PSFVAR_DEGREES 0')
@@ -232,6 +230,8 @@ class PSF:
         min_snr: float,
         checkplots: bool,
         psf_size: int,
+        psfex_install='psfex',
+        sex_install='sex',
     ):
         """
         Build a PSF model from a list of images.
@@ -260,7 +260,7 @@ class PSF:
             # Run SExtractor on the image
             _run_se(image.sci_file, image.wht_file, output_cat, psf_size, 
                 seeing_fwhm = nominal_psf_fwhms[filt],  # Use the nominal PSF FWHM for the filter
-                sex_install=None
+                sex_install=sex_install,
             )
 
             output_catalogs.append(output_cat)
@@ -295,7 +295,8 @@ class PSF:
             max_ellip=max_ellip,
             min_snr=min_snr,
             checkplot_fwhm=checkplot_fwhm,
-            psf_size=psf_size
+            psf_size=psf_size,
+            psfex_install=psfex_install,
         )
 
         psf = fits.open(output_psf)[1].data['PSF_MASK'][0][0]
