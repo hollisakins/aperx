@@ -126,7 +126,7 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
     run = true
 
     detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_200_277_356_444_[tile].fits'
-    create_detection_image = true
+    overwrite_detection_image = false
     detection_image_type = 'ivw'
     detection_image_filters = ['f200w','f277w','f356w','f444w']
     detection_image_psfmatched = true
