@@ -11,6 +11,17 @@ from astropy.io import fits
 from scipy.optimize import curve_fit
 from astropy.stats import sigma_clipped_stats
 
+from rich.table import Table
+from rich.console import Console
+console = Console()
+console._log_render.omit_repeated_times = False
+
+# def rich_str(x):
+#     with console.capture() as capture:
+#         console.print(x, end="")
+#     return capture.get()
+
+
 def _fit_pixel_distribution(data, sigma_upper=1.0, maxiters=3):
     data = data.flatten()
     data = data[np.isfinite(data)]
@@ -42,12 +53,13 @@ class Catalog:
         self.config = config
         self.filters = config.filters
         self.tiles = config.tiles
+        self.psfhom_filter = config.psf_homogenization.target_filter
 
         self.images = self._parse_mosaics()
 
-        # Validate things
-        if not self.all_images_exist:
-            raise FileNotFoundError('Not all images exist!')
+        # # Validate things
+        # if not self.all_images_exist:
+        #     raise FileNotFoundError('Not all images exist!')
 
     def _parse_mosaics(self):
         images = {}
@@ -113,7 +125,14 @@ class Catalog:
                     
                     filepath = filepath.replace('[filter]', filt)
 
-                    psf_filepath = filepath.replace('[tile]', 'master') # TODO could be more general...
+                    if 'psf_tile' in mosaic_spec:
+                        psf_tile = mosaic_spec.psf_tile
+                    else:
+                        psf_tile = tile
+                    
+                    psf_tile = psf_tile.replace('[tile]', tile)
+                    
+                    psf_filepath = filepath.replace('[tile]', psf_tile)
 
                     filepath = filepath.replace('[tile]', tile)
 
@@ -136,10 +155,13 @@ class Catalog:
                         
                     psf_file = psf_filepath.replace('[ext]', 'psf')
 
-                    if 'psfmatched_ext' in mosaic_spec:
-                        psfmatched_file = filepath.replace('[ext]', mosaic_spec.psfmatched_ext)
+                    if filt == self.psfhom_filter:
+                        psfmatched_file = sci_file
                     else:
-                        psfmatched_file = filepath.replace('[ext]', 'sci_psfmatched')
+                        if 'psfmatched_ext' in mosaic_spec:
+                            psfmatched_file = filepath.replace('[ext]', mosaic_spec.psfmatched_ext)
+                        else:
+                            psfmatched_file = filepath.replace('[ext]', 'sci_psfmatched')
                         
                     if (']' in sci_file) or ('[' in sci_file):
                         raise ValueError(f'Could not parse file {sci_file}')
@@ -155,6 +177,41 @@ class Catalog:
                     )
 
         return images
+
+    def pprint(self, filenames=False):
+        from rich.table import Table
+        for tile in self.images:
+            table = Table()
+            table.add_column(tile)
+
+            for filt in self.images[tile]:
+                table.add_column(filt, justify="center", style="cyan", no_wrap=True)
+            
+            def label(file):
+                l = ''
+                if os.path.exists(file):
+                    l += ':white_check_mark:'
+                else:
+                    l += ':x:'
+                if filenames:
+                    l += ' ' + os.path.basename(file)
+                return l
+
+            table.add_row('SCI', *[label(im.sci_file) for im in self.images[tile].values()])
+            table.add_row('ERR', *[label(im.err_file) for im in self.images[tile].values()])
+            table.add_row('WHT', *[label(im.wht_file) for im in self.images[tile].values()])
+            table.add_row('PSF', *[label(im.psf_file) for im in self.images[tile].values()])
+            table.add_row('PSFmatched', *[label(im.psfmatched_file) for im in self.images[tile].values()])
+
+            console.print(table)
+
+        #     # for filt in self.images[tile]:
+
+        # 'Exists: X'
+        # 'PSF: X'
+        # 'PSFmatched: X'
+        # pass
+
 
     @property
     def images_flipped(self):
@@ -215,42 +272,66 @@ class Catalog:
 
 
     def generate_psfs(self, 
-        psfex_install: str = 'psfex', # path to PSFEx installation
-        se_install: str = 'sex', # path to SExtractor installation
-        fwhm_min_scale: float = 0.75, # minimum FWHM scale for PSF generation
-        fwhm_max_scale: float = 1.75, # maximum FWHM scale for PSF generation
+        fwhm_min: float = 0.75, # minimum FWHM scale for PSF generation
+        fwhm_max: float = 1.75, # maximum FWHM scale for PSF generation
         max_ellip: float = 0.1, # maximum ellipticity for PSF generation
         min_snr: float = 8.0, # minimum SNR for PSF generation
         psf_size: int = 301, # size of PSF image, should be odd
         checkplots: bool = False, # whether to generate checkplots during PSF generation
         overwrite: bool = False, # whether to overwrite existing PSF files
+        plot: bool = False, # plot the final PSFs for inspection
     ):
 
         for filt in self.filters:
             images = list(self.images_flipped[filt].values())
             psf_files = [image.psf_file for image in images]
 
-            if len(set(psf_files)) != 1:
-                raise ValueError('All images for a given filter should have the same PSF file')
-            
-            psf_file = psf_files[0]
+            if len(images) == 1:
+                master_psf_file = None
+                if images[0].has_psf and not overwrite:
+                    print(f'All PSF files for {filt} already exist, skipping generation')
+                    continue
 
-            if os.path.exists(psf_file) and not overwrite:
-                print(f'PSF for {filt} already exists, skipping generation')
-                continue
-            
+            elif len(set(psf_files)) == 1:
+                # Build master PSF
+                master_psf_file = psf_files[0]
+                if os.path.exists(master_psf_file) and not overwrite:
+                    print(f'Master PSF for {filt} already exists, skipping generation')
+                    continue
+            else:
+                master_psf_file=None
+                all_exist = True
+                for psf_file in psf_files:
+                    all_exist = all_exist and os.path.exists(psf_file)
+                if all_exist and not overwrite:
+                    print(f'All PSF files for {filt} already exist, skipping generation')
+                    continue
+
             # Build PSFs
             from .psf import PSF
-            PSF.build(
-                images,
-                psf_file,
-                fwhm_min_scale,
-                fwhm_max_scale,
-                max_ellip, 
-                min_snr,
-                checkplots,
-                psf_size,
+            psf = PSF.build(
+                images=images,
+                fwhm_min=fwhm_min[filt],
+                fwhm_max=fwhm_max[filt],
+                max_ellip=max_ellip, 
+                min_snr=min_snr,
+                checkplots=checkplots,
+                psf_size=psf_size,
+                overwrite=overwrite,
+                master_psf_file=master_psf_file,
             )
+            
+            if plot:
+                if len(images)==1:
+                    psf.plot(save=images[0].psf_file.replace('.fits','.png'))
+                elif master_psf_file:
+                    psf.plot(save=master_psf_file.replace('.fits','.png'))
+                    for image in images:
+                        psf = PSF(image.sci_file.replace('_sci.fits','_psf.fits'))
+                        psf.plot(save=image.sci_file.replace('_sci.fits', '_psf.png'))
+                # for image in images:
+                #     psf.plot(save=image.psf_file.replace('.fits','.png'))
+
 
 
     def _build_chisq_detection_image(
@@ -331,7 +412,21 @@ class Catalog:
 
         return chi_mean
 
-    
+    def build_detection_image(
+        self,
+        file: str,
+        type: str, # ['ivw', 'chi-mean', 'chi-sq']
+        filters: List[str],
+        psfmatched: bool,
+    ):
+        if type == 'chi-mean':
+            return self._build_chimean_detection_image()
+        elif type == 'chi-sq':
+            return self._build_chisq_detection_image()
+        elif type == 'ivw':
+            return self._build_ivw_detection_image()
+        
+
 
 
 

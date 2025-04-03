@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 
 # import warnings
 # warnings.simplefilter('ignore')
-import tqdm
+import tqdm, time
 import astropy.units as u
 import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy.optimize import curve_fit
 from photutils.aperture import SkyCircularAperture, aperture_photometry
 from typing import Tuple
+from astropy.convolution import convolve_fft
 
 
 @dataclass
@@ -39,12 +40,21 @@ class Image:
     def base_file(self):
         return os.path.commonprefix([self.sci_file, self.err_file, self.wht_file])
 
+    @property 
+    def sci_exists(self):
+        return os.path.exists(self.sci_file)
+
+    @property 
+    def err_exists(self):
+        return os.path.exists(self.err_file) 
+
+    @property
+    def wht_exists(self):
+        return os.path.exists(self.wht_file)
+
     @property
     def exists(self):
-        sci_exists = os.path.exists(self.sci_file)
-        err_exists = os.path.exists(self.err_file) or (self.err_file is None)
-        wht_exists = os.path.exists(self.wht_file) or (self.wht_file is None)
-        return sci_exists and err_exists and wht_exists
+        return self.sci_exists and self.err_exists and self.wht_exists
 
     @property 
     def has_psf(self):
@@ -122,6 +132,14 @@ class Image:
         del self._sci, self._err, self._wht, self._psf, self._psfmatched
         self._sci, self._err, self._wht, self._psf, self._psfmatched = None, None, None, None, None
 
+    def convert_byteorder(self):
+        if self._sci is None: self.sci # call self.sci to load sci to self._sci
+        self._sci = self._sci.astype(self._sci.dtype.newbyteorder('='))
+        if self._err is None: self.err 
+        self._err = self._err.astype(self._err.dtype.newbyteorder('='))
+        if self._wht is None: self.wht
+        self._wht = self._wht.astype(self._wht.dtype.newbyteorder('='))
+
     @property
     def hdr(self):
         if self._hdr is None:
@@ -166,16 +184,22 @@ class Image:
             print('PSF matched file already exists, use overwrite=True to regenerate.')
             return
 
+        print(f'Generating homogenization kernel {self.filter} -> {target_filter} for {self}')
         kernel_file = self.psf_file.replace('.fits', f'_kernel_to_{target_filter}.fits')
         kernel_log_file = kernel_file.replace('.fits', '.log')
-        cmd = f"""
-            pypher {self.psf_file} {target_psf_file} {kernel_file}
-        """
-        # TODO add some regularization? 
-        subprocess.run(cmd, shell=True)
+        if not os.path.exists(kernel_file) or overwrite:
+            cmd = ['pypher', self.psf_file, target_psf_file, kernel_file] 
+            subprocess.run(cmd, check=True)
+
+        print(f'\t Convolving {self}...')
+        start = time.time()
 
         kernel = fits.getdata(kernel_file)
-        convolved = convolve_fft(self.sci, kernel, normalize_kernel=False)
+        convolved = convolve_fft(self.sci, kernel, normalize_kernel=False, allow_huge=True)
+        end = time.time()
+        t = end-start
+        print(f"\t Done in {int(np.floor(t/60))}m{int(t-60*int(np.floor(t/60)))}s")
+        print(f'\t Writing to {self.psfmatched_file}')
         hdu = fits.PrimaryHDU(convolved, header=self.hdr)
         hdul = fits.HDUList([hdu])
         hdul.writeto(self.psfmatched_file, overwrite=True)

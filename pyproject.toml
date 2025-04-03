@@ -23,6 +23,7 @@ dependencies = [
     "tqdm",
     "toml",
     "dotmap",
+    "pypher",
 ]
 
 [project.scripts]

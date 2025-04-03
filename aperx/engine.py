@@ -27,27 +27,26 @@ def main():
     
 
     cat = Catalog(config)
-
+    cat.pprint()
 
     base_logger = utils.setup_logger(name='aperx')
 
     if config.psf_generation.run: 
         step_logger = utils.setup_logger(name='aperx.psf_generation')
-        if cat.all_psfs_exist:
-            logger.warning('All necessary PSFs exist already, no need to generate?')
-        
-        cat.generate_psfs(
-            psfex_install = config.psf_generation.psfex_install,
-            fwhm_min_scale = config.psf_generation.fwhm_min_scale,
-            fwhm_max_scale = config.psf_generation.fwhm_max_scale,
-            max_ellip = config.psf_generation.max_ellip,
-            min_snr = config.psf_generation.min_snr,
-            psf_size = config.psf_generation.psf_size,
-            checkplots = config.psf_generation.checkplots,
-            overwrite = config.psf_generation.overwrite,
-            psfex_install = config.psf_generation.psfex_install,
-            sex_install = config.psf_generation.sex_install,
-        )
+
+        if cat.all_psfs_exist and not config.psf_generation.overwrite:
+            print('All necessary PSFs exist already, no need to generate?')
+        else:
+            cat.generate_psfs(
+                fwhm_min = config.psf_generation.fwhm_min,
+                fwhm_max = config.psf_generation.fwhm_max,
+                max_ellip = config.psf_generation.max_ellip,
+                min_snr = config.psf_generation.min_snr,
+                psf_size = config.psf_generation.psf_size,
+                checkplots = config.psf_generation.checkplots,
+                overwrite = config.psf_generation.overwrite,
+                plot = config.psf_generation.plot,
+            )
 
     if config.psf_homogenization.run:
         # homogenize PSFs
@@ -55,24 +54,36 @@ def main():
         overwrite = config.psf_homogenization.overwrite 
 
         if target_filter not in config.filters:
-            raise ValueError(f'PSF homogenization: target filter must be in {config.fitlers}')
+            raise ValueError(f'PSF homogenization: target filter must be in config.filters = {config.filters}')
 
-        target_images = cat.get_images(filt=target_filter)
-        psf_files = [image.psf_file for image in target_images]
-        if len(set(psf_files)) != 1:
-            raise ValueError('Target filter has differnt PSF files, something went awry')
-        target_psf_file = psf_files[0]
-
-        
-        for image in cat.images:
-            image.generate_psfmatched_image(
-                target_filter = target_filter,
-                target_psf_file = target_psf_file, 
-                overwrite = overwrite
-            )
+        for tile in cat.images:
+            target_image = cat.images[tile][target_filter]
+            images = [cat.images[tile][f] for f in cat.images[tile] if f != target_filter]
+            
+            for image in images:
+                image.generate_psfmatched_image(
+                    target_filter = target_filter,
+                    target_psf_file = target_image.psf_file,
+                    overwrite = overwrite
+                )
 
     if config.source_detection.run: 
-        pass
+        
+        detec_file = config.source_detection.detection_image
+        if not os.path.exists(detec_file) or config.source_detection.overwrite_detection_image:
+            catalog.build_detection_image(
+                file = detec_file,
+                type = config.source_detection.detection_image_type,
+                filters = config.source_detection.detection_image_filters,
+                psfmatched = config.source_detection.detection_image_psfmatched,
+            )
+        else:
+            catalog.load_detection_image(detec_file)
+
+        catalog.source_detection(config.source_detection)
+    
+        if config.secondary_source_detection.run: 
+            pass
 
     if config.photometry.run: 
         pass

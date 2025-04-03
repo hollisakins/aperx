@@ -1,10 +1,11 @@
 
 
 field_name = 'cosmos'
-tiles = ['B1','B2','B3']
+tiles = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','A1','A2','A3','A4','A5','A6','A7','A8','A9','A10']
+# tiles = ['B1','B2']
 
 # Filters ot include in the catalog (list of str, lowercase)
-filters = ['f444w'] 
+filters = ['f150w', 'f277w', 'f444w'] 
 
 # Where catalog output will be stored
 output_dir = '/n23data2/hakins/jwst/catalog/output/'
@@ -22,27 +23,82 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 # the config will always adopt the lowest-level nested definition, i.e., if `version` is defined only 
 # a certain subset of the mosaics, it will use that
 
+# TODO handle f410m, f090w
 [[mosaics]]
     pixel_scale = '30mas'
     version = 'v0p2'
     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-    filters = ['f090w','f115w','f150w','f200w','f277w','f356w','f410m','f444w']
+    filters = ['f115w','f150w','f277w','f444w']
+    psf_tile = 'master'
 
-[[mosaics]]
-    pixel_scale = '30mas'
-    sci_ext = 'drz'
-    filters = ['f814w']
-    tiles = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10']
-    filepath = '/n23data2/cosmosweb/COSMOS-Web_Jan24/ACS/'
-    filename = 'mosaic_cosmos_web_2024jan_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     version = 'v0p2'
+#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+#     filters = ['f115w','f150w','f277w','f444w']
+#     psf_tile = 'master' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     version = 'v0p2'
+#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+#     filters = ['f200w','f356w']
+#     tiles = ['B1','B2','B3','B4','B6','B7','B8','B9','A1','A2','A3','A4','A6','A7','A8','A9']
+#     psf_tile = '[tile]' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     version = 'v0p2'
+#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+#     filters = ['f200w','f356w']
+#     tiles = ['B5']
+#     psf_tile = 'B4' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     version = 'v0p2'
+#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+#     filters = ['f200w','f356w']
+#     tiles = ['B10']
+#     psf_tile = 'B9' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     version = 'v0p2'
+#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+#     filters = ['f200w','f356w']
+#     tiles = ['A5']
+#     psf_tile = 'A4' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     version = 'v0p2'
+#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+#     filters = ['f200w','f356w']
+#     tiles = ['A10']
+#     psf_tile = 'A9' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     sci_ext = 'drz'
+#     filters = ['f814w']
+#     tiles = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10']
+#     filepath = '/n23data2/cosmosweb/COSMOS-Web_Jan24/ACS/'
+#     filename = 'mosaic_cosmos_web_2024jan_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
     
-[[mosaics]]
-    pixel_scale = '30mas'
-    filters = ['f814w']
-    tiles = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10']
-    filepath = '/n23data2/cosmosweb/COSMOS-Web_Apr23/ACS/'
-    filename = 'mosaic_cosmos_web_2023apr_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
+# [[mosaics]]
+#     pixel_scale = '30mas'
+#     filters = ['f814w']
+#     tiles = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10']
+#     filepath = '/n23data2/cosmosweb/COSMOS-Web_Apr23/ACS/'
+#     filename = 'mosaic_cosmos_web_2023apr_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
     
 
 ##########################################################################################
@@ -52,52 +108,88 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 [psf_generation]
     run = true # Run PSF generation with PSFEx? 
     overwrite = false
-    psfex_install = '/softs/astromatic/psfex/3.22.1/bin/psfex' # <-- change!
-    fwhm_min_scale = 0.75  # Minimum FWHM for star selection, scale factor from nominal PSF FWHM
-    fwhm_max_scale = 1.75  # Minimum FWHM for star selection, scale factor from nominal PSF FWHM
+    fwhm_min = {f150w= 2.00, f277w=4.0, f444w=5.25}
+    fwhm_max = {f150w= 3.25, f277w=5.5, f444w=6.75}
+    min_snr = 100 # Minimum SNR for star selection
     max_ellip = 0.1 # Maximum ellipticity for star selection
-    min_snr = 8.0 # Minimum SNR for star selection
     psf_size = 301 # PSF array size
     checkplots = true
+    plot = true
 
 
 [psf_homogenization]
-    run = false
+    run = true
     target_filter = 'f444w'
     overwrite = false
 
-
 [source_detection]
     run = true
+
+    detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_200_277_356_444_[tile].fits'
     create_detection_image = true
-    detection_image_type = 'chi-mean'
+    detection_image_type = 'ivw'
+    detection_image_filters = ['f200w','f277w','f356w','f444w']
+    detection_image_psfmatched = true
 
-scheme = 'hot+cold'
-mask_scale_factor = 6
-mask_min_radius = 10
+    scheme = 'hot+cold'
+    cold_mask_scale_factor = 6
+    cold_mask_min_radius = 10
 
-[source_detection.cold]
-thresh = 4.66 # 5sigma=6.0, 4.5sigma=5.55, 4.0sigma=5.10, 3.5sigma=4.66
-minarea = 15 
-deblend_nthresh = 64 
-deblend_cont = 0.001 
-clean = true
-clean_param = 2.0
+    [source_detection.cold]
+        thresh = 3.5
+        thresh_type = 'relative'
+        minarea = 50
+        deblend_nthresh = 32 
+        deblend_cont = 0.01 
+        clean = true
+        clean_param = 2.0
 
-[source_detection.hot]
-thresh = 3.69763438 # 2.3sigma
-minarea = 8 
-deblend_nthresh = 64
-deblend_cont = 0.00001 
-clean = true
-clean_param = 0.5
+    [source_detection.hot]
+        thresh = 2.3 # 2.3sigma
+        thresh_type = 'relative'
+        minarea = 5
+        deblend_nthresh = 32
+        deblend_cont = 0.0001 
+        clean = true
+        clean_param = 0.5
 
 
 [secondary_source_detection]
-run = true
-create_detection_image = true
-detection_image_type = 'ivw'
-scheme = 'single'
+    run = false
+
+    detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_277_356_[tile].fits'
+    create_detection_image = true
+    detection_image_type = 'ivw'
+    detection_image_filters = ['f277w','f356w']
+    detection_image_psfmatched = true
+
+    # Defines the mask uses to combine sources from the primary 
+    # source_detection step and secondary_source_detection
+    mask_scale_factor = 6
+    mask_min_radius = 10
+
+    scheme = 'hot+cold'
+    cold_mask_scale_factor = 6
+    cold_mask_min_radius = 10
+
+    [seconary_source_detection.cold]
+        thresh = 3.5
+        thresh_type = 'relative'
+        minarea = 50
+        deblend_nthresh = 32 
+        deblend_cont = 0.01 
+        clean = true
+        clean_param = 2.0
+
+    [seconary_source_detection.hot]
+        thresh = 2.3 
+        thresh_type = 'relative'
+        minarea = 5
+        deblend_nthresh = 32
+        deblend_cont = 0.0001 
+        clean = true
+        clean_param = 0.5
+
 
 [photometry]
     run = true
