@@ -332,14 +332,12 @@ class Catalog:
                 # for image in images:
                 #     psf.plot(save=image.psf_file.replace('.fits','.png'))
 
-
-
-    def _build_chisq_detection_image(
+    def _build_ivw_detection_image(
         self, 
         detection_bands: List[str], 
         sigma_upper: float = 1.0,
         maxiters: int = 3,
-        truncate: bool = True,
+        psfmatched: bool = True,
     ):
         """
         Build a chi-squared detection image from a list of detection bands.
@@ -351,38 +349,46 @@ class Catalog:
         - truncate (bool): Whether to truncate individual SNR maps at 0.
         """
 
-        shapes = []
-        for band in detection_bands:
-            shapes.append(self.get_sci(band).shape)
-            # check that the detection bands are psf matched
+        self.detection_images = {}
+        for tile in self.images:
 
-        if len(set(shapes)) > 1:
-            raise ValueError('All detection bands must have the same shape.')
-        shape = shapes[0]
-
-        snr_images = np.zeros((len(detection_bands), *shape))
-        chisq = np.zeros(shape)
-        for i, band in enumerate(detection_bands):
-            # make normalized science images by multiplying by square root of the weight images
-            normalized_image = self.get_sci(band) * np.sqrt(self.get_wht(band))
+            # # ensure all detection bands are available in this tile
+            # if not all(band in self.images[tile] for band in detection_bands):
+            #     raise ValueError(f'Not all detection bands are available in tile {tile}')
             
+            # Check that the detection bands are all the same shape
+            shapes = []
+            for band in detection_bands:
+                shapes.append(self.images[tile][band].shape)
+            if len(set(shapes)) > 1:
+                raise ValueError(f'All detection bands must have the same shape.')
+            shape = shapes[0]
+
+            num, den = np.zeros(shape), np.zeros(shape)
+            for i, band in enumerate(detection_bands):
+                # make normalized science images by multiplying by square root of the weight images
+                if psfmatched:
+                    sci = self.images[tile][band].psfmatched
+                else:
+                    sci = self.images[tile][band].sci
+                wht = self.images[tile][band].wht # weight image
+
+                num += sci * wht
+                den += wht
+
+            nivw = num/den * np.sqrt(1/den) # normalized ivw
+                            
             # fit pixel distribution of normalized science images to a Gaussian to get the rms
             _, rms = _fit_pixel_distribution(
-                normalized_image, 
+                nivw, 
                 sigma_upper = sigma_upper, 
                 maxiters = maxiters
             )
             
             # make signal to noise images by dividing normalized science images by rms
-            snr = normalized_image / rms
-            if truncate:
-                snr[snr < 0] = 0
-            snr_images[i] = snr
-            
-        # make chi-sq images by summing in quadrature the signal to noise images
-        chisq = np.sum(np.power(snr_images, 2.))
+            snr = nivw / rms
 
-        return chisq
+            self.detection_images[tile] = snr # store the SNR image for this tile
 
     def _build_chimean_detection_image(
         self, 
@@ -418,17 +424,42 @@ class Catalog:
         type: str, # ['ivw', 'chi-mean', 'chi-sq']
         filters: List[str],
         psfmatched: bool,
+        **kwargs
     ):
         if type == 'chi-mean':
             return self._build_chimean_detection_image()
         elif type == 'chi-sq':
             return self._build_chisq_detection_image()
         elif type == 'ivw':
-            return self._build_ivw_detection_image()
+            if not 'sigma_upper' in kwargs:
+                kwargs['sigma_upper'] = 1.0
+                print('Warning: `sigma_upper` not specified, defaulting to 1.0.')
+            if not 'maxiters' in kwargs:
+                kwargs['maxiters'] = 3
+                print('Warning: `maxiters` not specified, defaulting to 3.')
+            self._build_ivw_detection_image(
+                detection_bands=filters, 
+                sigma_upper=kwargs['sigma_upper'],
+                maxiters=kwargs['maxiters'],
+                psfmatched=psfmatched, 
+            )
+        
+        else:
+            raise ValueError(f'Invalid detection image type: {type}. Must be one of ["ivw", "chi-mean", "chi-sq"].')
+        
+        # Write out the detection image(s) to a file
+        for tile in self.detection_images:
+            f = file.replace('[tile]', tile)
+            wcs = self.images[tile][self.psfhom_filter].wcs # use the WCS of the psf-homogenization filter, or any filter in the tile
+            fits.writeto(f, self.detection_images[tile], overwrite=True)
         
 
-
-
+    def load_detection_image(self, file: str):
+        self.detection_images = {}
+        for tile in self.images:
+            f = file.replace('[tile]', tile)
+            self.detection_images[tile] = fits.getdata(f)
+            
 
     def measure_random_aperture_scaling(filt, 
         min_radius: float, 
