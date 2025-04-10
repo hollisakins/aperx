@@ -17,27 +17,37 @@ from typing import Tuple
 from astropy.convolution import convolve_fft
 
 from .psf import PSF
+import glob
+import re
+
+from rich.table import Table as RichTable
+from rich.console import Console
+console = Console()
+console._log_render.omit_repeated_times = False
+
 
 @dataclass
 class Image:
+    filter: str
+    tile: str
     sci_file: str
     err_file: str
     wht_file: str
-    mask_file: str
-    filter: str
     psf_file: str = None
-    psfmatched_file: str = None
+    hom_file: str = None
+    # mask_file: str
 
     _sci : np.ndarray = field(init=False, repr=False, default=None)
     _err : np.ndarray = field(init=False, repr=False, default=None)
     _wht : np.ndarray = field(init=False, repr=False, default=None)
-    _mask : np.ndarray = field(init=False, repr=False, default=None)
+    _psf : np.ndarray = field(init=False, repr=False, default=None)
+    _hom : np.ndarray = field(init=False, repr=False, default=None)
+    
     _hdr : np.ndarray = field(init=False, repr=False, default=None)
     _wcs : np.ndarray = field(init=False, repr=False, default=None)
     _pixel_scale : float = field(init=False, repr=False, default=None)
     _shape : Tuple[int,int] = field(init=False, repr=False, default=None)
-    _psf : np.ndarray = field(init=False, repr=False, default=None)
-    _psfmatched : np.ndarray = field(init=False, repr=False, default=None)
+    # _mask : np.ndarray = field(init=False, repr=False, default=None)
 
     @property 
     def base_file(self):
@@ -54,22 +64,22 @@ class Image:
     @property
     def wht_exists(self):
         return os.path.exists(self.wht_file)
+    
+    @property
+    def psf_exists(self):
+        if self.psf_file is None:
+            return False
+        return os.path.exists(self.psf_file)
+    
+    @property
+    def hom_exists(self):
+        if self.hom_file is None:
+            return False
+        return os.path.exists(self.hom_file)
 
     @property
     def exists(self):
         return self.sci_exists and self.err_exists and self.wht_exists
-
-    @property 
-    def has_psf(self):
-        if self.psf_file is None:
-            return False
-        return os.path.exists(self.psf_file)
-
-    @property 
-    def has_psfmatched_equivalent(self):
-        if self.psfmatched_file is None:
-            return False
-        return os.path.exists(self.psfmatched_file)
 
     @property
     def sci(self):
@@ -113,47 +123,47 @@ class Image:
             self._wht = wht_image
         return self._wht
     
-    @property
-    def mask(self):
-        """
-        Load the source mask for the given band using memory mapping.
-        """
-        if self._mask is None:
-            with fits.open(self.mask_file, memmap=True) as hdul:
-                mask_image = hdul['SRCMASK'].data
-            self._mask = mask_image
-        return self._mask
+    # @property
+    # def mask(self):
+    #     """
+    #     Load the source mask for the given band using memory mapping.
+    #     """
+    #     if self._mask is None:
+    #         with fits.open(self.mask_file, memmap=True) as hdul:
+    #             mask_image = hdul['SRCMASK'].data
+    #         self._mask = mask_image
+    #     return self._mask
 
     @property
     def psf(self):
         """
         Load the PSF for the given band.
         """
-        if not self.has_psf:
+        if not self.psf_exists:
             raise FileNotFoundError(f"PSF file not found: {self.psf_file}")
         if self._psf is None:
             self._psf = PSF(self.psf_file)
         return self._psf
 
     @property
-    def psfmatched(self):
+    def hom(self):
         """
-        Load the psfmatched science image for the given band using memory mapping.
+        Load the PSF-homogenized science image for the given band using memory mapping.
         """
-        if not self.has_psfmatched_equivalent:
-            raise FileNotFoundError(f"PSF-matched file not found: {self.psfmatched_file}")
-        if self._psfmatched is None:
-            with fits.open(self.psfmatched_file, memmap=True) as hdul:
-                psfmatched_image = hdul['SCI'].data
-            self._psfmatched = psfmatched_image
-        return self._psfmatched
+        if not self.hom_exists:
+            raise FileNotFoundError(f"PSF-homogenized file not found: {self.hom_file}")
+        if self._hom is None:
+            with fits.open(self.hom_file, memmap=True) as hdul:
+                hom_image = hdul['SCI'].data
+            self._hom = hom_image
+        return self._hom
 
     def close(self):
         """
         Force close all memmapped arrays
         """
-        del self._sci, self._err, self._wht, self._psf, self._psfmatched
-        self._sci, self._err, self._wht, self._psf, self._psfmatched = None, None, None, None, None
+        del self._sci, self._err, self._wht, self._psf, self._hom
+        self._sci, self._err, self._wht, self._psf, self._hom = None, None, None, None, None
 
     def convert_byteorder(self):
         if self._sci is None: self.sci # call self.sci to load sci to self._sci
@@ -163,9 +173,9 @@ class Image:
         if self._wht is None: self.wht
         self._wht = self._wht.astype(self._wht.dtype.newbyteorder('='))
 
-        if self.has_psfmatched_equivalent:
-            if self._psfmatched is None: self.psfmatched
-            self._psfmatched = self._psfmatched.astype(self._psfmatched.dtype.newbyteorder('='))
+        if self.hom_exists:
+            if self._hom is None: self.hom
+            self._hom = self._hom.astype(self._hom.dtype.newbyteorder('='))
 
     @property
     def hdr(self):
@@ -194,14 +204,16 @@ class Image:
             self._shape = shape
         return self._shape
 
-
-
+    @property
+    def area(self):
+        """
+        On-sky area covered this image, in square arcmin
+        """
+        n_valid_pixels = np.sum(np.isfinite(self.sci))
+        return n_valid_pixels * self.pixel_scale**2 / 3600 # in sq. arcmin
 
     def __repr__(self):
-        return f"Image({os.path.basename(self.base_file)})"
-
- 
-
+        return f"Image({self.filter}, {self.tile})"
 
     def generate_psfmatched_image(self, target_filter, target_psf_file, reg_fact=1e-4, overwrite=False):
         """
@@ -242,14 +254,6 @@ class Image:
         os.remove(kernel_log_file)
         del hdu, hdul, convolved, kernel
 
-    @property
-    def area(self):
-        """
-        On-sky area covered this image, in square arcmin
-        """
-        n_valid_pixels = np.sum(np.isfinite(self.sci))
-        return n_valid_pixels * self.pixel_scale**2 / 3600 # in sq. arcmin
-
     def _compute_unit_conv(self, output_unit):
         output_unit = u.Unit(output_unit)
 
@@ -262,7 +266,7 @@ class Image:
             conversion *= ((self.pixel_scale * u.arcsec)**2).to(u.sr)
             conversion = conversion.to(output_unit).value
         else:
-            raise ValueError(f"Couldn't parse units ({current_unit}) for {image}")
+            raise ValueError(f"Couldn't parse units ({current_unit}) for {self}")
 
         return conversion
 
@@ -311,4 +315,242 @@ class Image:
 
 
 
+class Images:
+    def __init__(self, images: list[Image]):
+        self.images = images
 
+    @classmethod
+    def load(cls, 
+             image_patterns: list[str], 
+             filter: str | list[str] = '*',
+             tile: str | list[str] = '*', 
+             version: str = '', 
+             pixel_scale: str = '', 
+             sci_extension: str = 'sci',
+             err_extension: str = 'err',
+             wht_extension: str = 'wht',
+             psf_extension: str = 'psf',
+             psf_tile: str = 'master',
+             hom_extension: str = 'hom',
+        ):
+        """
+        Loads images from the given file patterns and returns an Images object.
+
+        File patterns can contain wildcards in brackets, e.g. [filter], [pixel_scale], [version], [tile].
+        By default, these will be treated as proper wildcards, and all images matching the pattern will be loaded.
+        If a specific value (or values) of a wildcard is given as a keyword argument, only images matching that 
+        value will be loaded.
+        Note that the [ext] keyword must be present, and is not treated as a wildcard, as the same image but with
+        different extensions are loaded as the same Image object.
+
+        Args:
+            image_patterns (list[str]): List of file patterns to load images from.
+            filter (str or list[str]): Filter(s) to match against the image patterns.
+            pixel_scale (str or list[str]): Pixel scale(s) to match against the image patterns.
+            version (str or list[str]): Version(s) to match against the image patterns.
+            tile (str or list[str]): Tile(s) to match against the image patterns.
+
+        Example:
+
+            ```
+            Images.load(
+                image_patterns = ['~/mosaics/[filter]/extensions/mosaic_nircam_[filter]_cosmos_[pixel_scale]_[version]_[tile]_[ext].fits'],
+                filter = ['f115w', 'f150w'],
+                pixel_scale = '30mas',
+                version = 'v1.0',
+                tile = '*', 
+            )
+            ```
+        """
+        if isinstance(filter, str):
+            filter = [filter]
+        if isinstance(pixel_scale, str):
+            pixel_scale = [pixel_scale]
+        if isinstance(version, str):
+            version = [version]
+        if isinstance(tile, str):
+            tile = [tile]
+
+        image_dict = {}
+        for image_pattern in image_patterns:
+            print('====================')
+            print(f'Loading images from {image_pattern}')
+            print('====================')
+            image_pattern_regex = image_pattern.replace('[filter]','(.+)')
+            image_pattern_regex = image_pattern_regex.replace('[filter]','(.+)')
+            image_pattern_regex = image_pattern_regex.replace('[pixel_scale]','(.+)')
+            image_pattern_regex = image_pattern_regex.replace('[version]','(.+)')
+            image_pattern_regex = image_pattern_regex.replace('[tile]','(.+)')
+            image_pattern_regex = image_pattern_regex.replace('[ext]','(.+)')
+            image_pattern_regex = fr'{image_pattern_regex}'
+            print(image_pattern_regex)
+            match = re.search(image_pattern_regex, image_pattern)
+            if match is None:
+                raise ValueError(f"Could not parse image pattern {image_pattern}")
+            else:
+                pattern_groups = list(match.groups())
+
+            # Replace bracketed wildcards with glob wildcards
+            glob_pattern = image_pattern.replace('[filter]', '*')
+            glob_pattern = glob_pattern.replace('[pixel_scale]', '*')
+            glob_pattern = glob_pattern.replace('[version]', '*')
+            glob_pattern = glob_pattern.replace('[tile]', '*')
+            glob_pattern = glob_pattern.replace('[ext]', sci_extension)
+
+            # Find all files matching the pattern
+            image_files = glob.glob(glob_pattern)
+            for image_file in image_files:
+                image_file_regex = image_pattern.replace('[filter]',r'([^_]+)')
+                image_file_regex = image_file_regex.replace('[filter]',r'([^_]+)')
+                image_file_regex = image_file_regex.replace('[pixel_scale]',r'([^_]+)')
+                image_file_regex = image_file_regex.replace('[version]',r'([^_]+)')
+                image_file_regex = image_file_regex.replace('[tile]',r'([^_]+)')
+                image_file_regex = image_file_regex.replace('[ext]',f'({sci_extension})')
+                image_file_regex = fr'{image_file_regex}'
+
+                match = re.search(image_file_regex, image_file)
+                if match is None:
+                    raise ValueError(f"Could not parse image file {image_file}")
+                else:
+                    image_file_groups = list(match.groups())
+
+                filter_i = image_file_groups[pattern_groups.index('[filter]')]
+                pixel_scale_i = image_file_groups[pattern_groups.index('[pixel_scale]')]
+                version_i = image_file_groups[pattern_groups.index('[version]')]
+                tile_i = image_file_groups[pattern_groups.index('[tile]')]
+                ext_i = image_file_groups[pattern_groups.index('[ext]')]
+
+                if filter != ['*'] and filter_i not in filter:
+                    continue
+                if tile != ['*'] and tile_i not in tile:
+                    continue
+                # if pixel_scale_i not in pixel_scale:
+                    # continue
+                # if version != ['*'] and version_i not in version:
+                    # continue
+                
+                # print(f'+ {image_file}')
+                # print(f'  | detected filter={filter_i}, pixel_scale={pixel_scale_i}, version={version_i}, tile={tile_i}, ext={ext_i}')
+
+                if tile_i not in image_dict:
+                    image_dict[tile_i] = {}
+                if filter_i not in image_dict[tile_i]:
+                    image_dict[tile_i][filter_i] = {}
+                
+                file = image_pattern.replace('[filter]', filter_i)
+                file = file.replace('[pixel_scale]', pixel_scale_i)
+                file = file.replace('[version]', version_i)
+                file = file.replace('[tile]', tile_i)
+            
+                image_dict[tile_i][filter_i][sci_extension] = image_file
+                image_dict[tile_i][filter_i][err_extension] = file.replace('[ext]', err_extension)
+                image_dict[tile_i][filter_i][wht_extension] = file.replace('[ext]', wht_extension)
+                image_dict[tile_i][filter_i][hom_extension] = file.replace('[ext]', hom_extension)
+                
+                file = image_pattern.replace('[filter]', filter_i)
+                file = file.replace('[pixel_scale]', pixel_scale_i)
+                file = file.replace('[version]', version_i)
+                file = file.replace('[tile]', psf_tile)
+                file = file.replace('[tile]', tile_i)
+                image_dict[tile_i][filter_i][psf_extension] = file.replace('[ext]', psf_extension)
+                
+
+            images = []
+            for tile in image_dict:
+                for filt in image_dict[tile]:
+                    sci_file = image_dict[tile][filt][sci_extension]
+                    err_file = image_dict[tile][filt][err_extension]
+                    wht_file = image_dict[tile][filt][wht_extension]
+                    psf_file = image_dict[tile][filt][psf_extension]
+                    hom_file = image_dict[tile][filt][hom_extension]
+                    print(sci_file)
+                    print(err_file)
+                    print(wht_file)
+                    print(psf_file)
+                    print(hom_file)
+                    print('')
+                    
+                    images.append(
+                        Image(
+                            tile=tile, 
+                            filter=filt, 
+                            sci_file = sci_file, 
+                            err_file = err_file, 
+                            wht_file = wht_file, 
+                            psf_file=psf_file, 
+                            hom_file=hom_file
+                        )
+                    )
+        
+        return cls(images)
+
+    def __getitem__(self, index):
+        return self.images[index]
+
+    def __len__(self):
+        return len(self.images)
+
+    def __iter__(self):
+        return iter(self.images)
+
+    def __repr__(self):
+        return f"Images({[image.__repr__() for image in self.images]})"
+    
+    def __str__(self):
+        return f"Images({[image.__repr__() for image in self.images]})"
+    
+    def __add__(self, other):
+        return Images(self.images + other.images)
+
+    def __radd__(self, other):
+        return Images(self.images + other.images)
+
+    def __iadd__(self, other):
+        self.images += other.images
+        return self
+
+    def __contains__(self, item):
+        return item in self.images
+
+    def __iter__(self):
+        return iter(self.images)
+
+    def get(self, tile=None, filter=None):
+        if tile is None and filter is None:
+            return self
+        elif tile is None:
+            return Images([image for image in self.images if image.filter == filter])
+        elif filter is None:
+            return Images([image for image in self.images if image.tile == tile])
+        else:
+            return [image for image in self.images if image.tile == tile and image.filter == filter][0]
+
+    def pprint(self, filenames=False):
+        for tile in self.images:
+            table = RichTable()
+            table.add_column(tile)
+
+            for filt in self.images[tile]:
+                table.add_column(filt, justify="center", style="cyan", no_wrap=True)
+            
+            def label(file):
+                l = ''
+                if os.path.exists(file):
+                    l += ':white_check_mark:'
+                else:
+                    l += ':x:'
+                if filenames:
+                    l += ' ' + os.path.basename(file)
+                return l
+
+            table.add_row('SCI', *[label(im.sci_file) for im in self.images[tile].values()])
+            table.add_row('ERR', *[label(im.err_file) for im in self.images[tile].values()])
+            table.add_row('WHT', *[label(im.wht_file) for im in self.images[tile].values()])
+            table.add_row('PSF', *[label(im.psf_file) for im in self.images[tile].values()])
+            table.add_row('HOM', *[label(im.hom_file) for im in self.images[tile].values()])
+
+            console.print(table)
+
+
+image_patterns = ['/n23data2/hakins/jwst/mosaics/[filter]/extensions/mosaic_nircam_[filter]_cosmos_[pixel_scale]_[version]_[tile]_[ext].fits']
+Images.load(image_patterns)

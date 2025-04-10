@@ -14,10 +14,6 @@ from scipy.optimize import curve_fit
 from astropy.stats import sigma_clipped_stats
 import astropy.units as u
 
-from rich.table import Table as RichTable
-from rich.console import Console
-console = Console()
-console._log_render.omit_repeated_times = False
 
 from astropy.wcs import WCS
 from astropy.table import Table, vstack
@@ -209,32 +205,6 @@ class Catalog:
                     images[tile][filt] = image
 
         return images
-
-    def pprint(self, filenames=False):
-        for tile in self.images:
-            table = RichTable()
-            table.add_column(tile)
-
-            for filt in self.images[tile]:
-                table.add_column(filt, justify="center", style="cyan", no_wrap=True)
-            
-            def label(file):
-                l = ''
-                if os.path.exists(file):
-                    l += ':white_check_mark:'
-                else:
-                    l += ':x:'
-                if filenames:
-                    l += ' ' + os.path.basename(file)
-                return l
-
-            table.add_row('SCI', *[label(im.sci_file) for im in self.images[tile].values()])
-            table.add_row('ERR', *[label(im.err_file) for im in self.images[tile].values()])
-            table.add_row('WHT', *[label(im.wht_file) for im in self.images[tile].values()])
-            table.add_row('PSF', *[label(im.psf_file) for im in self.images[tile].values()])
-            table.add_row('PSFmatched', *[label(im.psfmatched_file) for im in self.images[tile].values()])
-
-            console.print(table)
 
 
     @property
