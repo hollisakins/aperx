@@ -16,12 +16,14 @@ from photutils.aperture import SkyCircularAperture, aperture_photometry
 from typing import Tuple
 from astropy.convolution import convolve_fft
 
+from .psf import PSF
 
 @dataclass
 class Image:
     sci_file: str
     err_file: str
     wht_file: str
+    mask_file: str
     filter: str
     psf_file: str = None
     psfmatched_file: str = None
@@ -29,6 +31,7 @@ class Image:
     _sci : np.ndarray = field(init=False, repr=False, default=None)
     _err : np.ndarray = field(init=False, repr=False, default=None)
     _wht : np.ndarray = field(init=False, repr=False, default=None)
+    _mask : np.ndarray = field(init=False, repr=False, default=None)
     _hdr : np.ndarray = field(init=False, repr=False, default=None)
     _wcs : np.ndarray = field(init=False, repr=False, default=None)
     _pixel_scale : float = field(init=False, repr=False, default=None)
@@ -75,7 +78,10 @@ class Image:
         """
         if self._sci is None:
             with fits.open(self.sci_file, memmap=True) as hdul:
-                sci_image = hdul['SCI'].data
+                try:
+                    sci_image = hdul['SCI'].data
+                except:
+                    sci_image = hdul[0].data
             self._sci = sci_image
         return self._sci
         
@@ -86,7 +92,10 @@ class Image:
         """
         if self._err is None:
             with fits.open(self.err_file, memmap=True) as hdul:
-                err_image = hdul['ERR'].data
+                try:
+                    err_image = hdul['ERR'].data
+                except:
+                    err_image = hdul[0].data
             self._err = err_image
         return self._err
 
@@ -97,9 +106,23 @@ class Image:
         """
         if self._wht is None:
             with fits.open(self.wht_file, memmap=True) as hdul:
-                wht_image = hdul['WHT'].data
+                try:
+                    wht_image = hdul['WHT'].data
+                except:
+                    wht_image = hdul[0].data
             self._wht = wht_image
         return self._wht
+    
+    @property
+    def mask(self):
+        """
+        Load the source mask for the given band using memory mapping.
+        """
+        if self._mask is None:
+            with fits.open(self.mask_file, memmap=True) as hdul:
+                mask_image = hdul['SRCMASK'].data
+            self._mask = mask_image
+        return self._mask
 
     @property
     def psf(self):
@@ -140,6 +163,10 @@ class Image:
         if self._wht is None: self.wht
         self._wht = self._wht.astype(self._wht.dtype.newbyteorder('='))
 
+        if self.has_psfmatched_equivalent:
+            if self._psfmatched is None: self.psfmatched
+            self._psfmatched = self._psfmatched.astype(self._psfmatched.dtype.newbyteorder('='))
+
     @property
     def hdr(self):
         if self._hdr is None:
@@ -168,12 +195,15 @@ class Image:
         return self._shape
 
 
+
+
     def __repr__(self):
         return f"Image({os.path.basename(self.base_file)})"
 
+ 
 
 
-    def generate_psfmatched_image(self, target_filter, target_psf_file, overwrite=False):
+    def generate_psfmatched_image(self, target_filter, target_psf_file, reg_fact=1e-4, overwrite=False):
         """
         Convolve the science image with the PSF and save the result to a new file.
         """
@@ -188,7 +218,7 @@ class Image:
         kernel_file = self.psf_file.replace('.fits', f'_kernel_to_{target_filter}.fits')
         kernel_log_file = kernel_file.replace('.fits', '.log')
         if not os.path.exists(kernel_file) or overwrite:
-            cmd = ['pypher', self.psf_file, target_psf_file, kernel_file] 
+            cmd = ['pypher', self.psf_file, target_psf_file, kernel_file, '-r', str(reg_fact)] 
             subprocess.run(cmd, check=True)
 
         print(f'\t Convolving {self}...')
@@ -199,6 +229,10 @@ class Image:
         end = time.time()
         t = end-start
         print(f"\t Done in {int(np.floor(t/60))}m{int(t-60*int(np.floor(t/60)))}s")
+
+        convolved[np.isnan(self.sci)|(self.wht==0)] = np.nan
+        convolved = convolved.astype(self.sci.dtype) # convolution sets dtype to float64 
+
         print(f'\t Writing to {self.psfmatched_file}')
         hdu = fits.PrimaryHDU(convolved, header=self.hdr)
         hdul = fits.HDUList([hdu])
@@ -213,22 +247,46 @@ class Image:
         """
         On-sky area covered this image, in square arcmin
         """
-        return np.prod(self.shape) * self.pixel_scale**2 / 3600 # in sq. arcmin
+        n_valid_pixels = np.sum(np.isfinite(self.sci))
+        return n_valid_pixels * self.pixel_scale**2 / 3600 # in sq. arcmin
 
+    def _compute_unit_conv(self, output_unit):
+        output_unit = u.Unit(output_unit)
+
+        if not 'spectral flux density' in output_unit.physical_type:
+            raise ValueError('Currently only fnu units are supported')
+
+        current_unit = self.hdr['BUNIT']
+        if current_unit == 'MJy/sr':
+            conversion = 1e6*u.Jy/u.sr
+            conversion *= ((self.pixel_scale * u.arcsec)**2).to(u.sr)
+            conversion = conversion.to(output_unit).value
+        else:
+            raise ValueError(f"Couldn't parse units ({current_unit}) for {image}")
+
+        return conversion
+
+    def get_background_pixels(
+        self, 
+        psfmatched = False,
+    ):
+
+        if psfmatched:
+            nsci = self.psfmatched * np.sqrt(self.wht)
+        else:
+            nsci = self.sci * np.sqrt(self.wht)
+        
+        nsci = nsci[(self.mask==0)&(np.isfinite(nsci))]
+        return nsci
 
 
     def get_random_aperture_fluxes(
-        aperture_diameters: np.ndarray,
-        num_apertures_per_sq_arcmin: int,
-        source_mask,
+        self,
+        aperture_diameter: float,
+        num_apertures: int,
         psfmatched = False,
     ):
         
-        num_apertures = int(num_apertures_per_sq_arcmin * self.area)
-
-        num_diameters = len(aperture_diameters)
-        flux = np.zeros((num_apertures,num_diameters,))
-
         if psfmatched: 
             nsci = self.psfmatched * np.sqrt(self.wht)
         else:
@@ -237,17 +295,17 @@ class Image:
         x, y = np.arange(np.shape(nsci)[1]), np.arange(np.shape(nsci)[0])
         x, y = np.meshgrid(x, y)
         x, y = x.flatten(), y.flatten()
-        mask = ~source_mask & np.isfinite(nsci.flatten())
+        mask = (self.mask == 0) & np.isfinite(nsci)
+        mask = mask.flatten()
         x, y = x[mask], y[mask]
         i = np.random.randint(low=0,high=len(x),size=num_apertures)
         x, y = x[i], y[i]
-        centroids = wcs.pixel_to_world(x, y)
+        centroids = self.wcs.pixel_to_world(x, y)
 
-        for i in range(num_diameters):
-            d = aperture_diameters[i]*u.arcsec
-            aperture = SkyCircularAperture(centroids, r=d/2)
-            tbl = aperture_photometry(nsci, aperture, mask=mask, wcs=wcs)
-            flux[:,i] = np.array(tbl['aperture_sum'],dtype=float)
+        d = aperture_diameter*u.arcsec
+        aperture = SkyCircularAperture(centroids, r=d/2)
+        tbl = aperture_photometry(nsci, aperture, mask=~np.isfinite(nsci), wcs=self.wcs) # mask=self.mask>0
+        flux = np.array(tbl['aperture_sum'],dtype=float)
 
         return flux
 

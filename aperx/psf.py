@@ -1,4 +1,3 @@
-from .image import Image
 from .utils import Gaussian
 import os, warnings, subprocess
 from typing import List
@@ -6,11 +5,16 @@ import numpy as np
 from astropy.io import fits
 from astropy.table import Table, vstack
 from astropy.wcs import WCS
+import astropy.units as u
 import matplotlib.pyplot as plt
 
 from astropy.nddata.utils import NoOverlapError, PartialOverlapError
 
 nominal_psf_fwhms = {
+    'f435w': 0.045,
+    'f606w': 0.075,
+    'f814w': 0.100,
+    'f098m': 0.210,
     'f070w': 0.023,
     'f090w': 0.030,
     'f115w': 0.037,
@@ -221,6 +225,8 @@ class PSF:
 
         self.name = os.path.basename(filepath)
         self.data = fits.getdata(filepath)
+        self.wcs = WCS(fits.getheader(filepath))
+        self.pixel_scale = np.abs(self.wcs.proj_plane_pixel_scales()[0]).to(u.arcsec).value
 
     def derive_aperture_correction(self, aperture_radius: float):
         """
@@ -478,15 +484,17 @@ class PSF:
     
     @classmethod
     def build(cls, 
-        images: Image | List[Image], 
+        images, 
         fwhm_min: float,
         fwhm_max: float,
         max_ellip: float, 
         min_snr: float,
+        max_snr: float,
         checkplots: bool,
         psf_size: int,
         overwrite: bool = False,
         master_psf_file = None,
+        az_average: bool = False,
     ):
         """
         Build a PSF model from a list of images.
@@ -497,7 +505,7 @@ class PSF:
             raise ValueError('PSF size must be odd.')
 
         # Determine the image filter, relevant for setting fwhm_min, fwhm_max
-        if isinstance(images, Image):
+        if not type(images) == list:
             filt = images.filter
             images = [images]
         elif len(images)==1:
@@ -635,10 +643,16 @@ class PSF:
                 warnings.simplefilter('ignore')
                 snr = flux/fluxerr
             ellip = (objs['a']-objs['b'])/(objs['a']+objs['b'])
-            cond = (fwhm > fwhm_min) & (fwhm < fwhm_max) & (snr > min_snr) & (ellip < max_ellip)
+            cond = np.logical_and.reduce((
+                fwhm > fwhm_min, 
+                fwhm < fwhm_max,
+                snr > min_snr, 
+                snr < max_snr, 
+                ellip < max_ellip,
+            ))
             print(f'\t Identified {len(cond[cond])} PSF stars')
 
-            psf_file = image.sci_file.replace('_sci.fits', '_psf.fits')
+            psf_file = image.base_file + 'psf.fits'
 
             if checkplots:
                 fig, ax = plt.subplots(constrained_layout=True)
@@ -649,9 +663,10 @@ class PSF:
                 ax.set_ylabel('SNR')
                 ax.set_ylim(3, 1e5)
                 ax.loglog()
-                ax.plot([fwhm_min, fwhm_min], [min_snr, 1e5], linewidth=1, color='r', linestyle='--')
-                ax.plot([fwhm_max, fwhm_max], [min_snr, 1e5], linewidth=1, color='r', linestyle='--')
+                ax.plot([fwhm_min, fwhm_min], [min_snr, max_snr], linewidth=1, color='r', linestyle='--')
+                ax.plot([fwhm_max, fwhm_max], [min_snr, max_snr], linewidth=1, color='r', linestyle='--')
                 ax.plot([fwhm_min, fwhm_max], [min_snr, min_snr], linewidth=1, color='r', linestyle='--')
+                ax.plot([fwhm_min, fwhm_max], [max_snr, max_snr], linewidth=1, color='r', linestyle='--')
                 ax.axvline(nominal_psf_fwhms[filt]/image.pixel_scale, linewidth=1, color='b', linestyle=':')
                 plt.savefig(psf_file.replace('.fits','_fwhm.pdf'))
                 plt.close()
@@ -677,6 +692,14 @@ class PSF:
                     zi = cutout.data.flatten()
                 except (NoOverlapError, PartialOverlapError):
                     zi = np.full(psf_size**2, np.nan)
+
+                if az_average:
+                    theta = np.random.uniform(0, np.pi)
+                    xp = (xi-psf_size/2) * np.cos(theta) - (yi-psf_size/2) * np.sin(theta) + psf_size/2
+                    yp = (xi-psf_size/2) * np.sin(theta) + (yi-psf_size/2) * np.cos(theta) + psf_size/2
+                    xi = xp
+                    yi = yp
+
                 x_grid[i*(psf_size**2):(i+1)*(psf_size)**2] = xi
                 y_grid[i*(psf_size**2):(i+1)*(psf_size)**2] = yi
                 z_grid[i*(psf_size**2):(i+1)*(psf_size)**2] = zi
@@ -714,6 +737,13 @@ class PSF:
             
             psf = psf - bkg
             
+            psf[psf < 0] = 0
+            xg, yg = np.arange(psf_size), np.arange(psf_size)
+            xg, yg = np.meshgrid(xg, yg)
+            dist = np.sqrt((xg-psf_size/2)**2 + (yg-psf_size/2)**2)
+            psf[dist > psf_size/2] = 0
+
+
 
             print(f'\t Writing to {psf_file}')
             wcs = images[0].wcs
@@ -764,6 +794,14 @@ class PSF:
                     zi = cutout.data.flatten()
                 except (NoOverlapError, PartialOverlapError):
                     zi = np.full(psf_size**2, np.nan)
+
+                if az_average:
+                    theta = np.random.uniform(0, np.pi)
+                    xp = (xi-psf_size/2) * np.cos(theta) - (yi-psf_size/2) * np.sin(theta) + psf_size/2
+                    yp = (xi-psf_size/2) * np.sin(theta) + (yi-psf_size/2) * np.cos(theta) + psf_size/2
+                    xi = xp
+                    yi = yp
+
                 x_grid[i*(psf_size**2):(i+1)*(psf_size)**2] = xi
                 y_grid[i*(psf_size**2):(i+1)*(psf_size)**2] = yi
                 z_grid[i*(psf_size**2):(i+1)*(psf_size)**2] = zi
@@ -800,6 +838,11 @@ class PSF:
                 bkg = median
             
             psf = psf - bkg
+            psf[psf < 0] = 0
+            xg, yg = np.arange(psf_size), np.arange(psf_size)
+            xg, yg = np.meshgrid(xg, yg)
+            dist = np.sqrt((xg-psf_size/2)**2 + (yg-psf_size/2)**2)
+            psf[dist > psf_size/2] = 0
 
             psf_file = master_psf_file
             print(f'\t Writing to {psf_file}')

@@ -1,14 +1,23 @@
 
 
 field_name = 'cosmos'
+# tiles = ['B3', 'B7', 'B8', 'A2', 'A3', 'A6', 'A7']
 tiles = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','A1','A2','A3','A4','A5','A6','A7','A8','A9','A10']
+# tiles = ['A1','A2','A3','A4','A6','A7','A8','A9','B1','B2','B5','B6','B7','B8','B10']
+# tiles = ['A2','A3','A6','A7','A8','A9','B2','B3','B7','B8']
+# tiles = ['B1', 'B2', 'B3', 'B6', 'B7', 'B8', 'A2', 'A3', 'A6', 'A7']
 # tiles = ['B1','B2']
 
 # Filters ot include in the catalog (list of str, lowercase)
-filters = ['f150w', 'f277w', 'f444w'] 
+# filters = ['f435w', 'f606w', 'f814w', 'f150w','f200w', 'f277w', 'f356w', 'f410m', 'f444w'] 
+filters = ['f435w', 'f606w', 'f444w'] 
+
+
+flux_unit = 'uJy'
 
 # Where catalog output will be stored
 output_dir = '/n23data2/hakins/jwst/catalog/output/'
+output_filename = 'cosmos_hot+cold_aperture_catalog_v0.2.fits'
 
 
 ##########################################################################################
@@ -27,92 +36,80 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 [[mosaics]]
     pixel_scale = '30mas'
     version = 'v0p2'
-    filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
+    filepath = '/n23data2/hakins/jwst/mosaics/[filter]/extensions/'
     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-    filters = ['f115w','f150w','f277w','f444w']
+    filters = ['f115w', 'f150w', 'f277w', 'f444w']
     psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     version = 'v0p2'
-#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
-#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-#     filters = ['f115w','f150w','f277w','f444w']
-#     psf_tile = 'master' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+[[mosaics]]
+    pixel_scale = '30mas'
+    version = 'v0p2'
+    filepath = '/n23data2/hakins/jwst/mosaics/[filter]/extensions/'
+    filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+    filters = ['f200w', 'f356w']
+    tiles = ['B1', 'B2', 'B3', 'B6', 'B7', 'B8', 'A2', 'A3', 'A6', 'A7']
+    psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     version = 'v0p2'
-#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
-#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-#     filters = ['f200w','f356w']
-#     tiles = ['B1','B2','B3','B4','B6','B7','B8','B9','A1','A2','A3','A4','A6','A7','A8','A9']
-#     psf_tile = '[tile]' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+[[mosaics]]
+    pixel_scale = '30mas'
+    version = 'v0p2'
+    filepath = '/n23data2/hakins/jwst/mosaics/[filter]/extensions/'
+    filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
+    filters = ['f410m']
+    tiles = ['B3', 'B7', 'B8', 'A2', 'A3', 'A6', 'A7']
+    psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     version = 'v0p2'
-#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
-#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-#     filters = ['f200w','f356w']
-#     tiles = ['B5']
-#     psf_tile = 'B4' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+[[mosaics]]
+    pixel_scale = '30mas'
+    sci_ext = 'drz'
+    filters = ['f814w']
+    tiles = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10']
+    filepath = '/n23data2/hakins/hst/cosmos/f814w/'
+    filename = 'mosaic_cosmos_web_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
+    psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     version = 'v0p2'
-#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
-#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-#     filters = ['f200w','f356w']
-#     tiles = ['B10']
-#     psf_tile = 'B9' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+[[mosaics]]
+    pixel_scale = '30mas'
+    sci_ext = 'drz'
+    filters = ['f435w']
+    tiles = ['A2','A3','A6','A7','A8','A9','B2','B3','B7','B8']
+    filepath = '//n23data2/hakins/hst/clutch/v0.3/[filter]/'
+    filename = 'mosaic_cosmos_all_hst_acs_wfc_[filter]_[pixel_scale]_tile_[tile]_v0.3_[ext].fits'
+    psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     version = 'v0p2'
-#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
-#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-#     filters = ['f200w','f356w']
-#     tiles = ['A5']
-#     psf_tile = 'A4' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+[[mosaics]]
+    pixel_scale = '30mas'
+    sci_ext = 'drz'
+    filters = ['f606w']
+    tiles = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10']
+    filepath = '//n23data2/hakins/hst/clutch/v0.3/[filter]/'
+    filename = 'mosaic_cosmos_all_hst_acs_wfc_[filter]_[pixel_scale]_tile_[tile]_v0.3_[ext].fits'
+    psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     version = 'v0p2'
-#     filepath = '/n23data2/hakins/jwst/mosaics_newflats/[filter]/extensions/'
-#     filename = 'mosaic_nircam_[filter]_[field_name]_[pixel_scale]_[version]_[tile]_[ext].fits'
-#     filters = ['f200w','f356w']
-#     tiles = ['A10']
-#     psf_tile = 'A9' # 'master' or 'B1' e.g. specific tile to apply to all mosaics, or '[tile]' to use tile-specific PSF
+[[mosaics]]
+    pixel_scale = '30mas'
+    sci_ext = 'drz'
+    filters = ['f098m']
+    tiles = ['A1','A2','A3','A4','A6','A7','A8','A9','B1','B2','B5','B6','B7','B8','B10']
+    filepath = '//n23data2/hakins/hst/clutch/v0.3/[filter]/'
+    filename = 'mosaic_cosmos_all_hst_wfc3_ir_[filter]_[pixel_scale]_tile_[tile]_v0.3_[ext].fits'
+    psf_tile = 'master'
 
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     sci_ext = 'drz'
-#     filters = ['f814w']
-#     tiles = ['B1','B2','B3','B4','B5','B6','B7','B8','B9','B10']
-#     filepath = '/n23data2/cosmosweb/COSMOS-Web_Jan24/ACS/'
-#     filename = 'mosaic_cosmos_web_2024jan_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
-    
-# [[mosaics]]
-#     pixel_scale = '30mas'
-#     filters = ['f814w']
-#     tiles = ['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10']
-#     filepath = '/n23data2/cosmosweb/COSMOS-Web_Apr23/ACS/'
-#     filename = 'mosaic_cosmos_web_2023apr_[pixel_scale]_tile_[tile]_hst_acs_wfc_[filter]_[ext].fits'
-    
 
 ##########################################################################################
 # This section begins the configuration for the catalog generation. To start, we have a 
 # number of pre-processing steps.
 
 [psf_generation]
-    run = true # Run PSF generation with PSFEx? 
+    run = false # Run PSF generation?
     overwrite = false
-    fwhm_min = {f150w= 2.00, f277w=4.0, f444w=5.25}
-    fwhm_max = {f150w= 3.25, f277w=5.5, f444w=6.75}
-    min_snr = 100 # Minimum SNR for star selection
+    fwhm_min = {f435w=2.5, f606w=3.00, f814w=4.0, f098m=5.0, f150w=2.00, f200w=2.50, f277w=4.0, f356w=4.75, f410m=5.25, f444w=5.25}
+    fwhm_max = {f435w=6.0, f606w=5.00, f814w=5.0, f098m=9.0, f150w=3.25, f200w=3.75, f277w=5.5, f356w=6.25, f410m=6.75, f444w=6.75}
+    min_snr = 75 # Minimum SNR for star selection
+    max_snr = 1000 # Minimum SNR for star selection
     max_ellip = 0.1 # Maximum ellipticity for star selection
-    psf_size = 301 # PSF array size
+    psf_size = 151 # PSF array size
+    az_average = true # azimuthally average PSFs 
     checkplots = true
     plot = true
 
@@ -120,103 +117,120 @@ output_dir = '/n23data2/hakins/jwst/catalog/output/'
 [psf_homogenization]
     run = true
     target_filter = 'f444w'
+    # inverse_filters = ['f098m', 'f770w']
+    reg_fact = 3e-3
     overwrite = false
 
 [source_detection]
-    run = true
+    run = false
 
-    detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_200_277_356_444_[tile].fits'
+    detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_200_277_356_444_[tile]_[ext].fits'
     overwrite_detection_image = false
     detection_image_type = 'ivw'
     detection_image_filters = ['f200w','f277w','f356w','f444w']
     detection_image_psfmatched = true
 
-    scheme = 'hot+cold'
+    windowed_positions = false
+
+    detection_scheme = 'hot+cold'
     cold_mask_scale_factor = 6
     cold_mask_min_radius = 10
 
     [source_detection.cold]
         thresh = 3.5
-        thresh_type = 'relative'
         minarea = 50
         deblend_nthresh = 32 
         deblend_cont = 0.01 
+        kernel_type = 'tophat'
+        kernel_params = {radius=4.5}
+        filter_type = 'matched'
         clean = true
         clean_param = 2.0
 
     [source_detection.hot]
         thresh = 2.3 # 2.3sigma
-        thresh_type = 'relative'
         minarea = 5
         deblend_nthresh = 32
         deblend_cont = 0.0001 
+        kernel_type = 'gaussian'
+        kernel_params = {fwhm=3, size=9}
+        filter_type = 'matched'
         clean = true
         clean_param = 0.5
 
 
-[secondary_source_detection]
-    run = false
+# [secondary_source_detection]
+#     run = false
 
-    detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_277_356_[tile].fits'
-    create_detection_image = true
-    detection_image_type = 'ivw'
-    detection_image_filters = ['f277w','f356w']
-    detection_image_psfmatched = true
+#     detection_image = '/n23data2/hakins/jwst/catalog/detection_images/detec_cosmos_ivw_277_356_[tile].fits'
+#     create_detection_image = true
+#     detection_image_type = 'ivw'
+#     detection_image_filters = ['f277w','f356w']
+#     detection_image_psfmatched = true
 
-    # Defines the mask uses to combine sources from the primary 
-    # source_detection step and secondary_source_detection
-    mask_scale_factor = 6
-    mask_min_radius = 10
+#     # Defines the mask uses to combine sources from the primary 
+#     # source_detection step and secondary_source_detection
+#     mask_scale_factor = 6
+#     mask_min_radius = 10
 
-    scheme = 'hot+cold'
-    cold_mask_scale_factor = 6
-    cold_mask_min_radius = 10
+#     scheme = 'hot+cold'
+#     cold_mask_scale_factor = 6
+#     cold_mask_min_radius = 10
 
-    [seconary_source_detection.cold]
-        thresh = 3.5
-        thresh_type = 'relative'
-        minarea = 50
-        deblend_nthresh = 32 
-        deblend_cont = 0.01 
-        clean = true
-        clean_param = 2.0
+#     [seconary_source_detection.cold]
+#         thresh = 3.5
+#         thresh_type = 'relative'
+#         minarea = 50
+#         deblend_nthresh = 32 
+#         deblend_cont = 0.01 
+#         clean = true
+#         clean_param = 2.0
 
-    [seconary_source_detection.hot]
-        thresh = 2.3 
-        thresh_type = 'relative'
-        minarea = 5
-        deblend_nthresh = 32
-        deblend_cont = 0.0001 
-        clean = true
-        clean_param = 0.5
+#     [seconary_source_detection.hot]
+#         thresh = 2.3 
+#         thresh_type = 'relative'
+#         minarea = 5
+#         deblend_nthresh = 32
+#         deblend_cont = 0.0001 
+#         clean = true
+#         clean_param = 0.5
 
 
 [photometry]
-    run = true
-    aper_phot_native = true
-    aper_phot_psfmatched = true
-    aperture_diameters = [0.2, 0.3, 0.5, 0.75, 1.0] 
+    run = false
 
-    auto_phot = true
-    auto1_kron_factor = 1.1
-    auto1_min_radius = 1.6
-    auto2_kron_factor = 2.5
-    auto2_min_radius = 3.5
-    kron_corr_thresh = 3
+    [photometry.aper]
+        run_native = true
+        run_psfmatched = true
+        aperture_diameters = [0.2, 0.3, 0.5, 0.75, 1.0] 
+
+    [photometry.auto]
+        run = true
+        kron_params = [1.1, 1.6]
+        
+        kron_corr = true
+        kron_corr_band = 'f444w'
+        kron_corr_thresh = 3
+        kron_corr_params = [2.5, 3.5]
 
 
 [post_processing]
-    run = true # Run post processing steps? Must be true for any of the following steps to run. 
+    run = false # Run post processing steps? Must be true for any of the following steps to run. 
 
+    [post_processing.merge_tiles]
+        run = true
+    
     [post_processing.random_apertures]
         run = true # apply random aperture-based error rescaling
         overwrite = false # overwrite the measured random aperture curves?
-        min_radius = 0.15
-        max_radius = 1.5
-        num_radii = 30
-        num_apertures_per_sq_arcmin = 80
+        min_radius = 0.05
+        max_radius = 1.50
+        num_radii = 40
+        num_apertures_per_sq_arcmin = 100
         checkplots = true
 
     [post_processing.psf_corrections]
         run = true
-    
+        overwrite = false # overwrite the measured psf correction grids?
+        checkplots = true
+

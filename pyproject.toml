@@ -19,11 +19,12 @@ dependencies = [
     "photutils",
     "numpy",
     "matplotlib",
-    "scipy",
+    "scipy>1.15",
     "tqdm",
     "toml",
     "dotmap",
     "pypher",
+    "emcee",
 ]
 
 [project.scripts]
