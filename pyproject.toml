@@ -25,6 +25,7 @@ dependencies = [
     "dotmap",
     "pypher",
     "emcee",
+    "eazy",
 ]
 
 [project.scripts]

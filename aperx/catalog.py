@@ -1,28 +1,54 @@
-from .image import Image
+from .image import Image, Images
+from . import utils
 
 from collections import defaultdict
 from typing import List
-import os, warnings, tqdm
-import numpy as np
+import os, warnings, tqdm, sys
 import pickle
+from copy import copy
+
+import numpy as np
+import numpy.typing as npt
+from scipy.optimize import curve_fit
+
+from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
+import astropy.units as u
+from astropy.wcs import WCS
+from astropy.table import Table, vstack
+from photutils.aperture import aperture_photometry, CircularAperture, ApertureStats
+from astropy.coordinates import SkyCoord
+
+import sep
+sep.set_extract_pixstack(int(1e7))
+sep.set_sub_object_limit(4096)
 
 def gauss(x, A, mu, sigma):
     return A * np.exp(-0.5*(x-mu)**2/sigma**2)
 
-from astropy.io import fits
-from scipy.optimize import curve_fit
-from astropy.stats import sigma_clipped_stats
-import astropy.units as u
 
+def distance_to_nearest_edge(x, y, image_width, image_height):
+    """
+    Compute the distance to the nearest edge for a point (x, y) in an image.
 
-from astropy.wcs import WCS
-from astropy.table import Table, vstack
+    Parameters:
+    x (float): X-coordinate of the point.
+    y (float): Y-coordinate of the point.
+    image_width (int): Width of the image.
+    image_height (int): Height of the image.
 
-from photutils.aperture import aperture_photometry, CircularAperture, ApertureStats
+    Returns:
+    float: Distance to the nearest edge.
+    """
+    left_edge_dist = x
+    right_edge_dist = image_width - x
+    top_edge_dist = y
+    bottom_edge_dist = image_height - y
 
-import sep
-sep.set_extract_pixstack(int(1e7))
-sep.set_sub_object_limit(2048)
+    if np.ndim(x)==1:
+        return np.min([left_edge_dist, right_edge_dist, top_edge_dist, bottom_edge_dist], axis=0)
+    else:
+        return min(left_edge_dist, right_edge_dist, top_edge_dist, bottom_edge_dist)
 
 
 
@@ -37,7 +63,7 @@ def _fit_pixel_distribution(data, sigma_upper=1.0, maxiters=3, uncertainties=Fal
     y = y/np.max(y)
     p0 = [1, median, std]
     bc = 0.5*(bins[1:]+bins[:-1])
-    popt, pcov = curve_fit(gauss, bc[bc<median], y[bc<median], p0=p0)
+    popt, pcov = curve_fit(gauss, bc[bc<median], y[bc<median], p0=p0, bounds=([0.5,-20*std,0],[2,20*std,10*std]))
 
     for i in range(maxiters):
         p0 = popt
@@ -45,7 +71,7 @@ def _fit_pixel_distribution(data, sigma_upper=1.0, maxiters=3, uncertainties=Fal
         y, bins = np.histogram(data, bins=bins)
         y = y/np.max(y)
         bc = 0.5*(bins[1:]+bins[:-1])
-        popt, pcov = curve_fit(gauss, bc[bc<median+sigma_upper*popt[2]], y[bc<median+sigma_upper*popt[2]], p0=p0)
+        popt, pcov = curve_fit(gauss, bc[bc<median+sigma_upper*popt[2]], y[bc<median+sigma_upper*popt[2]], p0=p0, bounds=([0.5,-20*std,0],[2,20*std,10*std]))
 
     if uncertainties:
         perr = np.sqrt(np.diag(pcov))
@@ -55,205 +81,397 @@ def _fit_pixel_distribution(data, sigma_upper=1.0, maxiters=3, uncertainties=Fal
 
 class Catalog:
 
-    def __init__(self, 
-        config, 
-        filters,  
-        tiles, 
-        psfhom_filter, 
-        flux_unit = 'uJy', 
+    def __init__(
+        self,
+        images: Images,
+        flux_unit: str = 'uJy', 
     ):
 
-        self.config = config
-        self.filters = filters
-        self.tiles = tiles
+        # config, 
+        # filters,  
+        # tiles, 
+        # self.config = config
+        # self.filters = filters
+        # self.tiles = tiles
+        self.images = images
+        self.filters = copy(sorted(self.images.filters))
+        self.tiles = copy(sorted(self.images.tiles))
+
         self.flux_unit = flux_unit
-        self.psfhom_filter = psfhom_filter 
-        self.images = self._parse_mosaics()
-        self.detection_images = {}
+        self.memmap = images.memmap
+
+        self.detection_images = Images([], memmap=self.memmap)
         self.objects = {}
-        self.segmentation_maps = {}
-        self.has_auto = False
-        self.has_aper_native = False
-        self.has_aper_psfmatched = False
+        # self.has_auto = False
+        # self.has_aper_nat = False
+        # self.has_aper_hom = False
+
+        self.logger = utils.setup_logger(name='aperx.catalog')
 
     @classmethod
     def load(cls, file):
         pass
 
-    def _parse_mosaics(self):
-        images = {}
-        for tile in self.tiles:
-            images[tile] = {}
-            for filt in self.filters:
+    ############################################################################################################
+    ################################################### PSFs ###################################################
+    ############################################################################################################
 
-                for mosaic_spec in self.config.mosaics:
-                    # If filter is already specified, skip it 
-                    if filt in images[tile]: 
-                        continue
+    def generate_psfs(
+        self, 
+        fwhm_min: float = 0.75, # minimum FWHM scale for PSF generation
+        fwhm_max: float = 1.75, # maximum FWHM scale for PSF generation
+        max_ellip: float = 0.1, # maximum ellipticity for PSF generation
+        min_snr: float = 8.0, # minimum SNR for PSF generation
+        max_snr: float = 1000.0, # minimum SNR for PSF generation
+        psf_size: int = 301, # size of PSF image, should be odd
+        checkplots: bool = False, # whether to generate checkplots during PSF generation
+        overwrite: bool = False, # whether to overwrite existing PSF files
+        plot: bool = False, # plot the final PSFs for inspection
+        az_average: bool = False,
+    ):
 
-                    # If mosaic spec is not valid for this tile, skip it
-                    if 'tiles' in mosaic_spec:
-                        if tile not in mosaic_spec.tiles:
-                            continue
-                        
-                    # If mosaic spec is not valid for this filter, skip it
-                    if 'filters' in mosaic_spec:
-                        if filt not in mosaic_spec.filters: 
-                            continue
-                    
-                    # Otherwise, we're good to add this image
-                    if 'filepath' not in mosaic_spec: 
-                        raise ValueError('Missing filepath')
-                    filepath = str(mosaic_spec.filepath)
-                    
-                    if 'filename' not in mosaic_spec: 
-                        raise ValueError('Missing filename')
-                    filename = str(mosaic_spec.filename)
+        for filt in self.filters:
+            images = self.images.get(filter=filt)
+            psf_files = [image.psf_file for image in images]
 
-                    filepath = os.path.join(filepath, filename)
+            if len(images) == 1:
+                master_psf_file = None
+                if images[0].psf_exists and not overwrite:
+                    self.logger.info(f'All PSF files for {filt} already exist, skipping generation')
+                    continue
 
-                    if '[pixel_scale]' in filepath or '[pixel_scale]' in filename:
-                        if 'pixel_scale' in mosaic_spec:
-                            pixel_scale = mosaic_spec.pixel_scale
-                        elif 'pixel_scale' in self.config:
-                            pixel_sale = self.config.pixel_scale
-                        else:
-                            raise ValueError('Missing pixel_scale')
+            elif len(set(psf_files)) == 1:
+                # Build master PSF
+                master_psf_file = psf_files[0]
+                if os.path.exists(master_psf_file) and not overwrite:
+                    self.logger.info(f'Master PSF for {filt} already exists, skipping generation')
+                    continue
+            else:
+                master_psf_file=None
+                all_exist = True
+                for psf_file in psf_files:
+                    all_exist = all_exist and os.path.exists(psf_file)
+                if all_exist and not overwrite:
+                    self.logger.info(f'All PSF files for {filt} already exist, skipping generation')
+                    continue
 
-                        filepath = filepath.replace('[pixel_scale]', pixel_scale)
+            # Build PSFs
+            from .psf import PSF
+            psf = PSF.build(
+                images=images,
+                fwhm_min=fwhm_min[filt],
+                fwhm_max=fwhm_max[filt],
+                max_ellip=max_ellip, 
+                min_snr=min_snr,
+                max_snr=max_snr,
+                checkplots=checkplots,
+                psf_size=psf_size,
+                overwrite=overwrite,
+                master_psf_file=master_psf_file,
+                az_average=az_average,
+                logger = self.logger,
+            )
+            
+            if plot:
+                if len(images)==1:
+                    psf.plot(save=images[0].psf_file.replace('.fits','.png'))
+                elif master_psf_file:
+                    psf.plot(save=master_psf_file.replace('.fits','.png'))
+                    for image in images:
+                        psf = PSF(image.base_file + 'psf.fits', logger=self.logger)
+                        psf.plot(save=image.base_file + 'psf.png')
 
-                    if '[version]' in filepath or '[version]' in filename:    
-                        if 'version' in mosaic_spec:
-                            version = mosaic_spec.version
-                        elif 'version' in self.config:
-                            version = self.config.version
-                        else:
-                            raise ValueError('missing version')
+    def generate_psfhomogenized_images(
+        self, 
+        tile,
+        target_filter, 
+        inverse_filters = [],
+        reg_fact: float = 1e-4,
+        overwrite: bool = False,
+    ):
+        self.psfhom_target_filter = target_filter
+        self.psfhom_inverse_filters = inverse_filters
 
-                        filepath = filepath.replace('[version]', version)
+        if target_filter not in self.filters:
+            msg = f'Target filter must be in {self.filters}'
+            self.logger.error(msg)
+            sys.exit(1)
+        
+        for filt in inverse_filters:
+            if filt not in self.filters:
+                msg = f'Inverse filter {filt} must be in {self.filters}'
+                self.logger.error(msg)
+                sys.exit(1)
+            
 
-                    if '[field_name]' in filepath or '[field_name]' in filename:
-                        if 'field_name' in mosaic_spec:
-                            field_name = mosaic_spec.field_name
-                        elif 'field_name' in self.config:
-                            field_name = self.config.field_name
-                        else:
-                            raise ValueError('missing field_name')
-
-                        filepath = filepath.replace('[field_name]', field_name)
-                    
-                    filepath = filepath.replace('[filter]', filt)
-
-                    if 'psf_tile' in mosaic_spec:
-                        psf_tile = mosaic_spec.psf_tile
-                    else:
-                        psf_tile = tile
-                    
-                    psf_tile = psf_tile.replace('[tile]', tile)
-                    
-                    psf_filepath = filepath.replace('[tile]', psf_tile)
-
-                    filepath = filepath.replace('[tile]', tile)
-
-                    if not filepath.endswith('.fits'):
-                        filepath += '.fits'
-
-                    if 'sci_ext' in mosaic_spec:
-                        sci_file = filepath.replace('[ext]', mosaic_spec.sci_ext)
-                    else:
-                        sci_file = filepath.replace('[ext]', 'sci')
-
-                    if 'err_ext' in mosaic_spec:
-                        err_file =  filepath.replace('[ext]', mosaic_spec.err_ext)
-                    else:
-                        err_file = filepath.replace('[ext]', 'err')
-                    
-                    if 'wht_ext' in mosaic_spec:
-                        wht_file = filepath.replace('[ext]', mosaic_spec.wht_ext)
-                    else:
-                        wht_file = filepath.replace('[ext]', 'wht')
-                    
-                    if 'mask_ext' in mosaic_spec:
-                        mask_file = filepath.replace('[ext]', mosaic_spec.mask_ext)
-                    else:
-                        mask_file = filepath.replace('[ext]', 'srcmask')
-                        
-                    psf_file = psf_filepath.replace('[ext]', 'psf')
-
-                    if filt == self.psfhom_filter:
-                        psfmatched_file = sci_file
-                    else:
-                        if 'psfmatched_ext' in mosaic_spec:
-                            psfmatched_file = filepath.replace('[ext]', mosaic_spec.psfmatched_ext)
-                        else:
-                            psfmatched_file = filepath.replace('[ext]', 'sci_psfmatched')
-                        
-                    if (']' in sci_file) or ('[' in sci_file):
-                        raise ValueError(f'Could not parse file {sci_file}')
-
-                    # Add to images dictionary
-                    image = Image(
-                        filter=filt,
-                        sci_file=sci_file, 
-                        err_file=err_file, 
-                        wht_file=wht_file, 
-                        mask_file=mask_file,
-                        psf_file=psf_file, 
-                        psfmatched_file=psfmatched_file
-                    )
-
-                    images[tile][filt] = image
-
-        return images
+        # For images with PSF smaller than the target, we perform normal PSF-homogenization 
+        target_image = self.images.get(tile=tile, filter=target_filter)[0]
+        other_filters = [f for f in self.filters if f != target_filter and f not in inverse_filters]
+        images = self.images.get(tile=tile, filter=other_filters)
+        
+        for image in images:
+            if 'mock' in image.sci_extension:
+                image.hom_file = image.base_file + f'hom_mock_{target_filter}.fits'
+            else:
+                image.hom_file = image.base_file + f'hom_{target_filter}.fits'
+            # image.hom_file = image.sci_file.
+            image.generate_psfhomogenized_image(
+                target_filter = target_filter,
+                target_psf_file = target_image.psf_file,
+                output_file = image.hom_file,
+                reg_fact = reg_fact, 
+                overwrite = overwrite,
+                logger = self.logger, 
+            )
+        
+        # For images with larger PSF than the target, generate target image PSF-matched to image
+        if len(inverse_filters) != 0:
+            images = self.images.get(tile=tile, filter=inverse_filters)
+            
+            for filt, image in zip(inverse_filters, images):
+                if 'mock' in image.sci_extension:
+                    image.hom_file = image.base_file.replace(filt, target_filter) + f'hom_mock_{filt}.fits'
+                else:
+                    image.hom_file = image.base_file.replace(filt, target_filter) + f'hom_{filt}.fits'
+                target_image.generate_psfhomogenized_image(
+                    target_filter = filt, 
+                    target_psf_file = image.psf_file, 
+                    output_file = image.hom_file,
+                    reg_fact = reg_fact, 
+                    overwrite = overwrite, 
+                    logger = self.logger
+                )
 
 
-    @property
-    def images_flipped(self):
-        flipped = defaultdict(dict)
-        for key, val in self.images.items():
-            for subkey, subval in val.items():
-                flipped[subkey][key] = subval
-        return flipped
+    ############################################################################################################
+    ############################################# DETECTION IMAGES #############################################
+    ############################################################################################################
 
-    @property
-    def all_images_exist(self):
-        all_exist = True
-        for tile in self.images:
-            for filt in self.images[tile]:
-                all_exist = all_exist and self.images[tile][filt].exists
-        return all_exist
+    def _build_ivw_detection_image(
+        self, 
+        tile,
+        detection_bands: List[str], 
+        sigma_upper: float = 1.0,
+        maxiters: int = 3,
+        psfhom: bool = True,
+    ):
+        """
+        Build an inverse-variance weighted detection image from a list of detection bands.
+
+        Args:
+        - detection_bands (List[str]): List of detection bands to use.
+        - sigma_upper (float): Sigma clipping threshold to esimate background rms.
+        - maxiters (int): Maximum number of iterations to use when fitting the pixel distribution.
+        """
+
+        self.logger.info(f'Building IVW detection image for {tile}')
+
+        # Check that the detection bands are all the same shape
+        shapes = []
+        for band in detection_bands:
+            shapes.append(self.images.get(tile=tile, filter=band)[0].shape)
+        if len(set(shapes)) > 1:
+            msg = f'All detection bands must have the same shape.'
+            self.logger.error(msg)
+            sys.exit(1)
+
+        shape = shapes[0]
+
+        nbands = np.zeros(shape, dtype=int)
+        num, den = np.zeros(shape), np.zeros(shape)
+        for i, band in enumerate(detection_bands):
+            # make normalized science images by multiplying by square root of the weight images
+            image = self.images.get(tile=tile, filter=band)[0]
+            if psfhom and band!=self.psfhom_target_filter and band not in self.psfhom_inverse_filters:
+                sci = image.hom
+            else:
+                sci = image.sci
+            wht = image.wht # weight image
+
+            num += sci * wht
+            den += wht
+            num[wht == 0] = np.nan
+            nbands[np.isfinite(sci)&(wht > 0)] += 1
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            # mask = nbands < len(detection_bands)
+            # num[mask] = np.nan
+            # den[mask] = np.nan
+            ivw = num/den
+            nivw = ivw * np.sqrt(den)
+
+
+        # fit pixel distribution of normalized science images to a Gaussian to get the rms
+        A, mu, sigma = _fit_pixel_distribution(
+            nivw, 
+            sigma_upper = sigma_upper, 
+            maxiters = maxiters
+        )
+
+        data = nivw.flatten()
+        data = data[np.isfinite(data)]
+        mean, median, std = sigma_clipped_stats(data, sigma=3.0, maxiters=3)
+        bins = np.linspace(median-5*std, median+5*std, 101)
+        
+        with warnings.catch_warnings(): 
+            warnings.simplefilter('ignore')    
+            detec_sci = (nivw - mu) / np.sqrt(den)
+            detec_err = sigma / np.sqrt(den)
+
+        return detec_sci, detec_err
+
+
+    def _build_chimean_detection_image(
+        self, 
+        detection_bands, 
+        **kwargs
+    ):
+        """
+        Build a chi-mean detection image from a list of detection bands.
+
+        Args:
+        - detection_bands (List[str]): List of detection bands to use.
+        - **kwargs: Additional keyword arguments to pass to _build_chisq_detection_image.
+        """
+
+        # make chi-sq image
+        chisq = self._build_chisq_detection_image(detection_bands, **kwargs)
+
+        n = np.zeros(chisq.shape)
+        for band in detection_bands:
+            isvalid = np.isfinite(self.science_images[band]) & (self.weight_images[band] > 0)
+            n += isvalid
+
+        from scipy.special import gamma
+        mu = np.sqrt(2) * gamma((n+1)/2) / gamma(n/2)
+        
+        chi_mean = (np.sqrt(chisq) - mu) / np.sqrt(n - mu**2)
+
+        return chi_mean
+
+    def build_detection_image(
+        self,
+        tile,
+        output_dir: str, 
+        output_filename: str,
+        method: str, # ['ivw', 'chi-mean', 'chi-sq']
+        filters: List[str],
+        psfhom: bool,
+        overwrite: bool = False,
+        **kwargs
+    ):
+        """
+        Builds a detection image for a given set of filters. 
+
+        Args:
+
+        """
+
+        if not os.path.exists(output_dir):
+            os.mkdir(output_dir)
+
+        
+        output_file = os.path.join(output_dir, output_filename)
+        detec_file = output_file.replace('[tile]', tile)
+        detec_sci_file = detec_file.replace('[ext]', 'sci')
+        detec_err_file = detec_file.replace('[ext]', 'err')
+        
+        self.logger.info('Building detection images')
+
+        if method == 'chi-mean':
+            return self._build_chimean_detection_image()
+        elif method == 'chi-sq':
+            return self._build_chisq_detection_image()
+        
+        # Inverse variance weighted detection image
+        elif method == 'ivw':
+            if any([self.images.get(tile=tile, filter=f) is None for f in filters]):
+                self.logger.warning(f'Tile {tile} does not have images for all detection bands {filters}')
+                filters = [f for f in filters if self.images.get(tile=tile,filter=f) is not None]
+                # return False
+
+            if (os.path.exists(detec_sci_file) and os.path.exists(detec_err_file)) and not overwrite:
+                self.logger.info(f'Skipping detection image generation for tile {tile}, detection image already exists!')
+
+                self.logger.info(f'Loading {detec_sci_file}')
+                self.detection_images += Image(
+                    filter = 'detec', 
+                    tile = tile,
+                    sci_file = detec_sci_file, 
+                    err_file = detec_err_file, 
+                    wht_file = None,
+                    psf_file = None,
+                    hom_file = None,
+                    memmap = self.memmap,
+                )
+                return True
+
+            detec_sci, detec_err = self._build_ivw_detection_image(
+                tile,
+                detection_bands=filters, 
+                sigma_upper=kwargs['sigma_upper'],
+                maxiters=kwargs['maxiters'],
+                psfhom=psfhom, 
+            )
+        
+            # Write out the detection image to a file
+            hom = self.images.get(tile=tile, filter=filters[-1])[0]
+            dtype = hom.sci.dtype
+            detec_sci = detec_sci.astype(dtype)
+            detec_err = detec_err.astype(dtype)
+            detec_hdr = hom.hdr
+            
+            fits.writeto(detec_sci_file, detec_sci, header=detec_hdr, overwrite=True)
+            fits.writeto(detec_err_file, detec_err, header=detec_hdr, overwrite=True)
+
+            self.detection_images += Image(
+                filter = 'detec', 
+                tile = tile,
+                sci_file = detec_sci_file, 
+                err_file = detec_err_file, 
+                wht_file = None,
+                psf_file = None,
+                hom_file = None,
+                memmap = self.memmap,
+            )
+
+            return True
     
-    @property
-    def all_psfs_exist(self):
-        all_exist = True
-        for tile in self.images:
-            for filt in self.images[tile]:
-                all_exist = all_exist and self.images[tile][filt].has_psf
-        return all_exist
-    
-    @property
-    def all_psfmatched_images_exist(self):
-        all_exist = True
-        for tile in self.images:
-            for filt in self.images[tile]:
-                all_exist = all_exist and self.images[tile][filt].has_psfmatched_equivalent
-        return all_exist
+        else:
+            msg = f'Invalid detection image method: {method}. Must be one of ["ivw", "chi-mean", "chi-sq"].'
+            self.logger.error(msg)
+            sys.exit(1)
+        
 
-    @property
-    def detection_image_exists(self):
-        pass
+
+    ############################################################################################################
+    ############################################# SOURCE DETECTION #############################################
+    ############################################################################################################
 
     def detect_sources(self, 
-        tile, 
-        detection_scheme = 'single',
+        tile: str,
+        detection_scheme: str = 'single',
+        save_segmap: bool = False,
         **kwargs, 
     ):
-        if 'sci' not in self.detection_images[tile] or 'err' not in self.detection_images[tile]:
-            raise ValueError('Detection images not loaded')
-        
-        detec_sci = self.detection_images[tile]['sci']
-        detec_err = self.detection_images[tile]['err']
-        detec = detec_sci/detec_err
+        """
+        Detects sources in the detection images. 
+
+        Args:
+            detection_scheme (str): 
+            kwargs: passed to detection function
+        """
+
+
+        if tile not in self.detection_images.tiles:
+            self.logger.warning(f"Detection image not found for tile {tile}; perhaps it doesn't have all the detection filters?")
+            return 
+
+        # self.tiles = self.detection_images.tiles
+            
+        detec_image = self.detection_images.get(tile=tile)[0]
+        detec = detec_image.sci/detec_image.err
         mask_nan = np.isnan(detec)
 
         
@@ -268,7 +486,7 @@ class Catalog:
             assert 'clean' in kwargs, "`source_detection.clean` must be specified"
             assert 'clean_param' in kwargs, "`source_detection.clean_param` must be specified"
 
-            print('Performing source detection')
+            self.logger.info(f'{tile}: Performing source detection')
             objs, segmap = self._detect_sources_single_stage(
                 detec, 
                 mask_nan,
@@ -282,14 +500,16 @@ class Catalog:
                 clean=kwargs['clean'],
                 clean_param=kwargs['clean_param'],
             )
-            print(f"{len(objs)} detections")
+            self.logger.info(f"{tile}: {len(objs)} detections")
 
         elif detection_scheme == 'hot+cold':
             assert 'cold' in kwargs, "`source_detection.cold` table not found"
             assert 'hot' in kwargs, "`source_detection.hot` table not found"
 
-            assert 'cold_mask_scale_factor' in kwargs, "`source_detection.cold_mask_scale_factor` must be specified"
-            assert 'cold_mask_min_radius' in kwargs, "`source_detection.cold_mask_min_radius` must be specified"
+            if not 'cold_mask_scale_factor' in kwargs:
+                kwargs['cold_mask_scale_factor'] = None
+            if not 'cold_mask_min_radius' in kwargs:
+                kwargs['cold_mask_min_radius'] = None
 
             # Check cold-mode parameters
             assert 'kernel_type' in kwargs['cold'], "`source_detection.cold.kernel_type` must be specified"
@@ -301,7 +521,7 @@ class Catalog:
             assert 'filter_type' in kwargs['cold'], "`source_detection.cold.filter_type` must be specified"
             assert 'clean' in kwargs['cold'], "`source_detection.cold.clean` must be specified"
             assert 'clean_param' in kwargs['cold'], "`source_detection.cold.clean_param` must be specified"
-       
+    
             # Check hot-mode parameters
             assert 'kernel_type' in kwargs['hot'], "`source_detection.hot.kernel_type` must be specified"
             assert 'kernel_params' in kwargs['hot'], "`source_detection.hot.kernel_params` must be specified"
@@ -313,7 +533,7 @@ class Catalog:
             assert 'clean' in kwargs['hot'], "`source_detection.hot.clean` must be specified"
             assert 'clean_param' in kwargs['hot'], "`source_detection.hot.clean_param` must be specified"
 
-            print('Performing cold-mode source detection...')
+            self.logger.info(f'{tile}: Performing cold-mode source detection')
             objs_cold, segmap_cold = self._detect_sources_single_stage(
                 detec, 
                 mask_nan,
@@ -329,7 +549,7 @@ class Catalog:
             )
             objs_cold['mode'] = 'cold'
 
-            print('Performing hot-mode source detection...')
+            self.logger.info(f'{tile}: Performing hot-mode source detection')
             objs_hot, segmap_hot = self._detect_sources_single_stage(
                 detec, 
                 mask_nan,
@@ -345,7 +565,7 @@ class Catalog:
             )
             objs_hot['mode'] = 'hot'
             
-            print('Merging hot+cold detections')
+            self.logger.info(f'{tile}: Merging hot+cold detections')
             objs, segmap = self._merge_detections(
                 objs_cold, segmap_cold,
                 objs_hot, segmap_hot, 
@@ -353,86 +573,17 @@ class Catalog:
                 mask_min_radius = kwargs['cold_mask_min_radius'], 
             )
 
-            print(f"{len(objs)} detections, {len(objs[objs['mode']=='cold'])} cold, {len(objs[objs['mode']=='hot'])} hot")
+            self.logger.info(f"{tile}: {len(objs)} detections, {len(objs[objs['mode']=='cold'])} cold, {len(objs[objs['mode']=='hot'])} hot")
 
         self.objects[tile] = objs
-        self.segmentation_maps[tile] = segmap
 
-    def compute_windowed_positions(self, tile):
-        print('Computing windowed positions...')
-        objs = self.objects[tile]
-        if 'kronrad' not in objs.columns:
-            self.compute_kron_radius(tile)
-        
-        detec_sci = self.detection_images[tile]['sci']
-        detec_err = self.detection_images[tile]['err']
-        detec = detec_sci / detec_err
-        mask = np.isnan(detec)
-        segmap = self.segmentation_maps[tile]
-
-        flux, fluxerr, flag = sep.sum_ellipse(
-            detec, objs['x'], objs['y'], 
-            objs['a'], objs['b'], objs['theta'], 
-            2.5*objs['kronrad'], subpix=1, mask=mask,
-            seg_id=objs['id'], segmap=segmap,
-        )
-
-        rhalf, rflag = sep.flux_radius(
-            detec, objs['x'], objs['y'], 
-            6.*objs['a'], 0.5, 
-            seg_id=objs['id'], segmap=segmap,
-            mask=mask, normflux=flux, subpix=5
-        )
-
-        sig = 2. / 2.35 * rhalf  
-        xwin, ywin, flag = sep.winpos(
-            detec, objs['x'], objs['y'], sig, 
-            mask=mask)
-
-        self.objects[tile]['xwin'] = xwin
-        self.objects[tile]['ywin'] = ywin
-
-    def add_ra_dec(self, tile, pos_key=None):
-        if pos_key == 'windowed':
-            x, y = self.objects[tile]['xwin'], self.objects[tile]['ywin']
+        if save_segmap:
+            output_file = detec_image.sci_file.replace('sci.fits', 'seg.fits')
+            fits.writeto(output_file, data=segmap, header=detec_image.hdr, overwrite=True)
+            detec_image.seg_file = output_file
         else:
-            x, y = self.objects[tile]['x'], self.objects[tile]['y']
-        
-        wcs = self.detection_images[tile]['wcs']
-        coords = wcs.pixel_to_world(x, y)
-        ra = coords.ra.value
-        dec = coords.dec.value
-        self.objects[tile]['ra'] = ra
-        self.objects[tile]['dec'] = dec
+            detec_image.seg = segmap
 
-    def compute_weights(self, tile, pos_key=None):
-        if pos_key == 'windowed':
-            x, y = self.objects[tile]['xwin'], self.objects[tile]['ywin']
-        else:
-            x, y = self.objects[tile]['x'], self.objects[tile]['y']
-        
-        for filt in self.images[tile]:
-            image = self.images[tile][filt]
-            aperture = CircularAperture(np.array([x, y]).T, r=5)
-            aperstats = ApertureStats(image.wht, aperture)
-            self.objects[tile][f'wht_{filt}'] = aperstats.median
-
-    def compute_kron_radius(self, tile, pos_key=None):
-        print('Computing kron radius...')
-        detec_sci = self.detection_images[tile]['sci']
-        detec_err = self.detection_images[tile]['err']
-        detec = detec_sci / detec_err
-        mask = np.isnan(detec)
-        objs = self.objects[tile]
-        segmap = self.segmentation_maps[tile]
-        if pos_key == 'windowed':
-            x, y = objs['xwin'], objs['ywin']
-        else:
-            x, y = objs['x'], objs['y']
-        a, b, theta = objs['a'], objs['b'], objs['theta']
-        kronrad, krflag = sep.kron_radius(detec, x, y, a, b, theta, r=6.0, mask=mask, seg_id=objs['id'], segmap=segmap)
-        self.objects[tile]['kronrad'] = kronrad
-        self.objects[tile]['flag'] |= krflag
 
     def _detect_sources_single_stage(
         self, 
@@ -491,8 +642,8 @@ class Catalog:
         self,
         objs1, segmap1,
         objs2, segmap2,
-        mask_scale_factor, # scale factor from objs1['a'] and objs['b'] that defines the elliptical mask
-        mask_min_radius, # minimum circular radius for the elliptical mask (pixels)
+        mask_scale_factor=None, # scale factor from objs1['a'] and objs['b'] that defines the elliptical mask
+        mask_min_radius=None, # minimum circular radius for the elliptical mask (pixels)
     ):
         '''
         Merges two lists of detections, objs1 and objs2, where all detections 
@@ -501,16 +652,20 @@ class Catalog:
         mask derived from mask_scale_factor and mask_min_radius. 
         '''
 
-        # Construct elliptical mask around sources in objs1
-        m = np.zeros(segmap1.shape, dtype=bool)
-        a = mask_scale_factor * objs1['a']
-        b = mask_scale_factor * objs1['b']
-        a[a < mask_min_radius] = mask_min_radius
-        b[b < mask_min_radius] = mask_min_radius
-        sep.mask_ellipse(m, objs1['x'], objs1['y'], a, b, objs1['theta'], r=1.)
+        if mask_min_radius is not None and mask_scale_factor is not None:
+            # Construct elliptical mask around sources in objs1
+            m = np.zeros(segmap1.shape, dtype=bool)
+            a = mask_scale_factor * objs1['a']
+            b = mask_scale_factor * objs1['b']
+            a[a < mask_min_radius] = mask_min_radius
+            b[b < mask_min_radius] = mask_min_radius
+            sep.mask_ellipse(m, objs1['x'], objs1['y'], a, b, objs1['theta'], r=1.)
 
-        # Combine mask with segmap1 area
-        mask = m | (segmap1 > 0)
+            # Combine mask with segmap1 area
+            mask = m | (segmap1 > 0)
+        
+        else:
+            mask = segmap1 > 0
         
         # Mask objects in objs2 with segmap pixels that overlap the mask
         ids_to_mask = np.unique(segmap2 * mask)[1:] 
@@ -525,14 +680,287 @@ class Catalog:
 
         return objs, segmap
 
+    def plot_detections(self, tile, output_dir):
+        from regions import Regions, EllipseSkyRegion
+        from photutils.utils.colormaps import make_random_cmap
+        from matplotlib.patches import Ellipse
+        from matplotlib import colors
+        import matplotlib.pyplot as plt
+
+        cmap1 = plt.colormaps['Greys_r']
+        cmap1.set_bad('k')
+        background_color='#000000ff'
+
+        self.logger.info(f'{tile}: Plotting detections')
+        objs = self.objects[tile]
+        detec_image = self.detection_images.get(tile=tile)[0]
+        detec = detec_image.sci / detec_image.err
+        segmap = detec_image.seg
+
+        cmap2 = make_random_cmap(len(objs)+1)
+        cmap2.colors[0] = colors.to_rgba(background_color)
+
+        fig, ax = plt.subplots(1,2,figsize=(14,10),sharex=True,sharey=True,constrained_layout=True)
+        ax[0].imshow(detec, norm=colors.LogNorm(vmin=1, vmax=300), cmap=cmap1)
+        ax[1].imshow(segmap, cmap=cmap2)
+
+        kronrad = objs['kronrad']
+        for i in range(len(objs)):
+            # reg = EllipseSkyRegion(center=center_sky[i], width=width_sky[i]*u.arcsec, height=height_sky[i]*u.arcsec, angle=(np.degrees(objs['theta'][i])+20)*u.deg)
+
+            e = Ellipse(xy=(objs['x'][i], objs['y'][i]), 
+                        width=2.5*kronrad[i]*objs['a'][i], height=2.5*kronrad[i]*objs['b'][i], angle=np.degrees(objs['theta'][i]))
+            e.set_facecolor('none')
+            e.set_linewidth(0.15)
+            e.set_edgecolor('lime')
+            if objs['flag'][i]>1:
+                e.set_edgecolor('r')
+
+            ax[0].add_artist(e)
+
+        ax[0].axis('off')
+        ax[1].axis('off')
+
+        output_filename = 'checkplot_' + os.path.basename(detec_image.base_file) + 'apertures+segm.pdf'
+        out = os.path.join(output_dir, 'plots', output_filename)
+        plt.savefig(out, dpi=1000)
+        plt.close()
+
+
+    ############################################################################################################
+    ########################################### MISCELLANEOUS CALCS ############################################
+    ############################################################################################################
+
+    def compute_kron_radius(self, tile, windowed=False):
+        self.logger.info(f'{tile}: Computing kron radius')
+
+        detec_image = self.detection_images.get(tile=tile)[0]
+        detec = detec_image.sci / detec_image.err
+        mask = np.isnan(detec)
+        segmap = detec_image.seg
+        objs = self.objects[tile]
+
+        if windowed:
+            x, y = objs['xwin'], objs['ywin']
+        else:
+            x, y = objs['x'], objs['y']
+
+        a, b, theta = objs['a'], objs['b'], objs['theta']
+        kronrad, krflag = sep.kron_radius(detec, x, y, a, b, theta, r=6.0, mask=mask, seg_id=objs['id'], segmap=segmap)
+        self.objects[tile]['kronrad'] = kronrad
+        self.objects[tile]['flag'] |= krflag
+
+    def compute_windowed_positions(self, tile):
+        self.logger.info(f'{tile}: Computing windowed positions')
+        objs = self.objects[tile]
+        if 'kronrad' not in objs.columns:
+            self.compute_kron_radius()
+    
+        detec_image = self.detection_images.get(tile=tile)[0]
+        detec = detec_image.sci / detec_image.err
+        mask = np.isnan(detec)
+        segmap = detec_image.seg
+
+        flux, fluxerr, flag = sep.sum_ellipse(
+            detec, objs['x'], objs['y'], 
+            objs['a'], objs['b'], objs['theta'], 
+            2.5*objs['kronrad'], subpix=1, mask=mask,
+            seg_id=objs['id'], segmap=segmap,
+        )
+
+        rhalf, rflag = sep.flux_radius(
+            detec, objs['x'], objs['y'], 
+            6.*objs['a'], 0.5, 
+            seg_id=objs['id'], segmap=segmap,
+            mask=mask, normflux=flux, subpix=5
+        )
+
+        sig = 2. / 2.35 * rhalf  
+        xwin, ywin, flag = sep.winpos(
+            detec, objs['x'], objs['y'], sig, 
+            mask=mask)
+
+        self.objects[tile]['xwin'] = xwin
+        self.objects[tile]['ywin'] = ywin
+
+    def compute_rhalf(self, tile):
+
+        images = self.images.get(tile=tile)
+        detec_image = self.detection_images.get(tile=tile)[0]
+        segmap = detec_image.seg
+        objs = self.objects[tile]
+        if 'kronrad' not in objs.columns:
+            self.compute_kron_radius()
+
+        for image in images:
+            band = image.filter
+            self.logger.info(f'{tile}: Computing half-light radii for band {band}')
+
+            mask = np.isnan(image.sci)
+
+            flux, fluxerr, flag = sep.sum_ellipse(
+                image.sci, objs['x'], objs['y'], objs['a'], objs['b'], objs['theta'], 
+                2.5*objs['kronrad'], subpix=1, mask=mask,
+                seg_id=objs['id'], segmap=segmap,
+            )
+
+            rhalf, rflag = sep.flux_radius(
+                image.sci, objs['x'], objs['y'], 6.*objs['a'], 0.5, 
+                seg_id=objs['id'], segmap=segmap,
+                mask=mask, normflux=flux, subpix=5
+            )
+
+            self.objects[tile][f'rh_{band}'] = rhalf
+
+
+
+    @property
+    def windowed(self):
+        tiles = list(self.objects)
+        objs0 = self.objects[tiles[0]]
+        return 'xwin' in objs0.columns and 'ywin' in objs0.columns
+
+    def get_xy(self, tile):
+        if self.windowed:
+            return self.objects[tile]['xwin'], self.objects[tile]['ywin']
+        else:
+            return self.objects[tile]['x'], self.objects[tile]['y']
+
+    def add_ra_dec(self, tile):
+        x, y = self.get_xy(tile)            
+        wcs = self.detection_images.get(tile=tile)[0].wcs
+        coords = wcs.pixel_to_world(x, y)
+        ra = coords.ra.value
+        dec = coords.dec.value
+        self.objects[tile]['ra'] = ra
+        self.objects[tile]['dec'] = dec
+
+    def compute_weights(self, tile):
+        self.logger.info(f'{tile}: Getting weight map values')
+        x, y = self.get_xy(tile)            
+        for image in self.images.get(tile=tile):
+            filt = image.filter
+            aperture = CircularAperture(np.array([x, y]).T, r=5)
+            aperstats = ApertureStats(image.wht, aperture)
+            self.objects[tile][f'wht_{filt}'] = aperstats.median
+
+
+    ############################################################################################################
+    ################################################ PHOTOMETRY ################################################
+    ############################################################################################################
+
+    @staticmethod
+    def _compute_aper_photometry(
+            objs: Table,
+            sci: npt.ArrayLike,
+            err: npt.ArrayLike | None,
+            mask: npt.ArrayLike | None, 
+            segmap: npt.ArrayLike, 
+            aperture_diameters: list[float],
+            windowed: bool = False
+        ) -> tuple[np.ndarray, ...]:
+
+        if windowed:
+            x, y = objs['xwin'], objs['ywin']
+        else:
+            x, y = objs['x'], objs['y']
+
+        flux = np.zeros((len(objs), len(aperture_diameters)))
+        fluxerr = np.zeros((len(objs), len(aperture_diameters)))
+        for i, diam in enumerate(aperture_diameters):
+
+            flux_i, fluxerr_i, flag = sep.sum_circle(
+                sci, x, y, 
+                diam/2, 
+                err=err, 
+                mask=mask, 
+                segmap=segmap, 
+                seg_id=objs['id']
+            )
+
+            flux[:,i] = flux_i
+            fluxerr[:,i] = fluxerr_i
+
+        return flux, fluxerr, flag
+
+    def compute_aper_photometry(
+        self, 
+        tile,
+        aperture_diameters: list[float], 
+        psfhom: bool = False,
+        flux_unit: str = 'uJy',
+    ):
+        self.aperture_diameters = aperture_diameters
+
+        images = self.images.get(tile=tile)
+        images.sort('filter')
+        segmap = self.detection_images.get(tile=tile)[0].seg
+
+        for image in images:
+            filt = image.filter
+
+            if psfhom:
+                self.logger.info(f'{tile}: Computing aper_hom photometry for {filt} (psf-homogenized)')
+                self._aper_hom = True
+            else:
+                self.logger.info(f'{tile}: Computing aper_nat photometry for {filt}, (native resolution)')
+                self._aper_nat = True
+
+            objs = self.objects[tile]
+            image.convert_byteorder()
+            if psfhom and filt != self.psfhom_target_filter and filt not in self.psfhom_inverse_filters:
+                sci = image.hom
+            else:
+                sci  = image.sci
+            err = image.err
+            mask = np.isnan(sci)
+
+            aperture_diameters_pixels = np.array(aperture_diameters) / image.pixel_scale
+
+            flux, fluxerr, flag = self._compute_aper_photometry(
+                objs, sci, err, mask, segmap, aperture_diameters_pixels, windowed=self.windowed,
+            )
+
+            if psfhom and filt in self.psfhom_inverse_filters:
+                self.logger.info(f'{tile}: Correcting {filt} based on {self.psfhom_target_filter} homogenization')
+                flux1, _, _ = self._compute_aper_photometry(
+                    objs, image.hom, None, mask, segmap, aperture_diameters_pixels, windowed=self.windowed,
+                ) # flux1 = aperture flux in <target_filter>, psf-homogenized to <filter>
+                image2 = images.get(filter=self.psfhom_target_filter)[0]
+                flux2, _, _ = self._compute_aper_photometry(
+                    objs, image2.sci, None, mask, segmap, aperture_diameters_pixels, windowed=self.windowed,
+                ) # flux2 = aperture flux in <target_filter>, native-resolution
+                
+                # correction factor for the flux lost due to the larger PSF
+                corr_fact = flux2/flux1
+                
+                flux *= corr_fact
+                fluxerr *= corr_fact
+                self.objects[f'psf_corr_aper_{filt}'] = corr_fact
+
+            conversion = image._compute_unit_conv(flux_unit)
+
+            if psfhom:
+                self.objects[tile][f'f_aper_hom_{filt}'] = flux * conversion
+                self.objects[tile][f'e_aper_hom_{filt}'] = fluxerr * conversion
+            else:
+                self.objects[tile][f'f_aper_nat_{filt}'] = flux * conversion
+                self.objects[tile][f'e_aper_nat_{filt}'] = fluxerr * conversion
+
+            image.close()
 
     @staticmethod
     def _compute_auto_photometry(
-            objs, sci, err, mask, segmap, kron_params, 
-            pos_key=None,
-        ):
+            objs: Table,
+            sci: npt.ArrayLike, 
+            err: npt.ArrayLike, 
+            mask: npt.ArrayLike,
+            segmap: npt.ArrayLike, 
+            kron_params: tuple[float,float],
+            windowed: bool = False,
+        ) -> tuple[np.ndarray, ...]:
 
-        if pos_key == 'windowed':
+        if windowed:
             x, y = objs['xwin'], objs['ywin']
         else:
             x, y = objs['x'], objs['y']
@@ -565,159 +993,109 @@ class Catalog:
 
     def compute_auto_photometry(
         self, 
-        tile, 
-        kron_params=(2.5,3.5),
-        pos_key=None,
-        flux_unit='uJy',
+        tile,
+        kron_params: tuple[float,float] = (2.5,3.5),
+        flux_unit: str = 'uJy',
     ):
-        for band in self.images[tile]:
+        images = self.images.get(tile=tile)
+        images.sort('filter')
+        segmap = self.detection_images.get(tile=tile)[0].seg
+
+        for image in images:
+            filt = image.filter
             
-            print(f'Computing auto photometry for {band}')
-            self.has_auto = True
+            self.logger.info(f'{tile}: Computing auto photometry for {filt}')
+            self._auto = True
 
             objs = self.objects[tile]
             if 'kronrad' not in objs.columns:
                 raise ValueError('kron radius must be computed before auto photometry')
             
-            im = self.images[tile][band]
-            im.convert_byteorder()
-            sci = im.psfmatched
-            err = im.err
+            image.convert_byteorder()
+            if filt != self.psfhom_target_filter and filt not in self.psfhom_inverse_filters:
+                sci = image.hom
+            else:
+                sci = image.sci
+            err = image.err
             mask = np.isnan(sci)
-            segmap = self.segmentation_maps[tile]
-            
             
             flux, fluxerr, flag, a, b = self._compute_auto_photometry(
-                objs, sci, err, mask, segmap, kron_params, pos_key=pos_key
+                objs, sci, err, mask, segmap, kron_params, windowed=self.windowed,
             )
 
-            # convert units
-            conversion = im._compute_unit_conv(flux_unit)
+            if filt in self.psfhom_inverse_filters:
+                self.logger.info(f'{tile}: Correcting {filt} based on {self.psfhom_target_filter} homogenization')
+                flux1, _, _, _, _ = self._compute_auto_photometry(
+                    objs, image.hom, None, mask, segmap, kron_params, windowed=self.windowed,
+                ) # flux1 = auto flux in <target_filter>, psf-homogenized to <filter>
+                image2 = images.get(filter=self.psfhom_target_filter)[0]
+                flux2, _, _, _, _ = self._compute_auto_photometry(
+                    objs, image2.sci, None, mask, segmap, kron_params, windowed=self.windowed,
+                ) # flux2 = aperture flux in <target_filter>, native-resolution
+                
+                # correction factor for the flux lost due to the larger PSF
+                corr_fact = flux2/flux1
+                
+                flux *= corr_fact
+                fluxerr *= corr_fact
+                self.objects[f'psf_corr_auto_{filt}'] = corr_fact
 
-            self.objects[tile][f'f_auto_{band}'] = flux * conversion
-            self.objects[tile][f'e_auto_{band}'] = fluxerr * conversion
+                
+            # convert units
+            conversion = image._compute_unit_conv(flux_unit)
+
+            self.objects[tile][f'f_auto_{filt}'] = flux * conversion
+            self.objects[tile][f'e_auto_{filt}'] = fluxerr * conversion
             self.objects[tile]['flag'] |= flag
-    
-    @staticmethod
-    def _compute_aper_photometry(
-            objs, sci, err, mask, segmap, aperture_diameters, 
-            pos_key=None,
-        ):
-
-        if pos_key == 'windowed':
-            x, y = objs['xwin'], objs['ywin']
-        else:
-            x, y = objs['x'], objs['y']
-        
-        flux = np.zeros((len(objs), len(aperture_diameters)))
-        fluxerr = np.zeros((len(objs), len(aperture_diameters)))
-        for i, diam in enumerate(aperture_diameters):
-
-            flux_i, fluxerr_i, flag = sep.sum_circle(
-                sci, x, y, 
-                diam/2, 
-                err=err, 
-                mask=mask, 
-                segmap=segmap, 
-                seg_id=objs['id']
-            )
-
-            flux[:,i] = flux_i
-            fluxerr[:,i] = fluxerr_i
-
-        return flux, fluxerr, flag
-
-    def compute_aper_photometry(
-        self, 
-        tile,
-        aperture_diameters, 
-        psfmatched=False,
-        pos_key=None,
-        flux_unit='uJy',
-    ):
-        self.aperture_diameters = aperture_diameters
-
-        for band in self.images[tile]:
-
-            if psfmatched:
-                print(f'Computing aper photometry for {band}, psf-matched')
-                self.has_aper_native = True
-            else:
-                print(f'Computing aper photometry for {band}, native resolution')
-                self.has_aper_psfmatched = True
-
-            objs = self.objects[tile]
-            im = self.images[tile][band]
-            im.convert_byteorder()
-            if psfmatched:
-                sci = im.psfmatched
-            else:
-                sci = im.sci
-            err = im.err
-            mask = np.isnan(sci)
-            segmap = self.segmentation_maps[tile]
             
-            aperture_diameters = aperture_diameters / im.pixel_scale
-            
-            flux, fluxerr, flag = self._compute_aper_photometry(
-                objs, sci, err, mask, segmap, aperture_diameters, pos_key=pos_key
-            )
-
-            # convert units
-            conversion = im._compute_unit_conv(flux_unit)
-
-            if psfmatched:
-                self.objects[tile][f'f_aper_psfmatched_{band}'] = flux * conversion
-                self.objects[tile][f'e_aper_psfmatched_{band}'] = fluxerr * conversion
-            else:
-                self.objects[tile][f'f_aper_native_{band}'] = flux * conversion
-                self.objects[tile][f'e_aper_native_{band}'] = fluxerr * conversion
-
+            image.close()
 
 
     def apply_kron_corr(
         self,
         tile,
-        band, 
-        thresh, 
-        kron_params1,
-        kron_params2,
-        pos_key=None
+        filt: str, 
+        thresh: float, 
+        kron_params1: tuple[float,float],
+        kron_params2: tuple[float,float],
     ):
 
-        if band in self.images[tile]:
-            im = self.images[tile][band]
-            im.convert_byteorder()
-            sci = im.sci
-            err = im.err
-            pixel_scale = im.pixel_scale
-        elif band == 'detec':
-            sci = self.detection_images[tile]['sci']
-            err = self.detection_images[tile]['err']
-            wcs = self.detection_images[tile]['wcs']
-            pixel_scale = np.abs(wcs.proj_plane_pixel_scales()[0]).to(u.arcsec).value
-        else:
-            raise ValueError(f'Cannot compute kron correction from band {band}')
+        images = self.images.get(tile=tile)
+        detec = self.detection_images.get(tile=tile)[0]
+        segmap = detec.seg
 
-        print(f'Computing kron correction from {band}')
+        # Compute the kron correction from the given filter
+        if filt in images.filters:
+            image = images.get(filter=filt)[0]
+            image.convert_byteorder()
+            sci = image.sci
+            err = image.err
+            pixel_scale = image.pixel_scale
+        
+        elif band == 'detec':
+            sci = detec.sci
+            err = detec.err
+            pixel_scale = detec.pixel_scale
+        else:
+            raise ValueError(f'Cannot compute kron correction from {filt}')
+
+        self.logger.info(f'{tile}: Computing kron correction from {filt}')
         mask = np.isnan(sci)
-        segmap = self.segmentation_maps[tile]
         objs = self.objects[tile]
         if 'kronrad' not in objs.columns:
             raise ValueError('kron radius must be computed before auto photometry')
 
-        flux1, fluxerr1, flag1, a1, b1 = self._compute_auto_photometry(objs, sci, err, mask, segmap, kron_params1, pos_key=pos_key)
-        flux2, fluxerr2, flag2, a2, b2 = self._compute_auto_photometry(objs, sci, err, mask, segmap, kron_params2, pos_key=pos_key)
+        flux1, fluxerr1, flag1, a1, b1 = self._compute_auto_photometry(objs, sci, err, mask, segmap, kron_params1, windowed=self.windowed)
+        flux2, fluxerr2, flag2, a2, b2 = self._compute_auto_photometry(objs, sci, err, mask, segmap, kron_params2, windowed=self.windowed)
         kron_corr = flux2/flux1
 
-        # derive KRON correction to correct from small elliptical apertures to total flux
         flag_blend = kron_corr > thresh
         kron_corr = np.where(kron_corr<1, 1, kron_corr)
         kron_corr = np.where(kron_corr>thresh, thresh, kron_corr)
 
-        for band in self.images[tile]:
-            self.objects[tile][f'f_auto_{band}'] *= kron_corr
-            self.objects[tile][f'e_auto_{band}'] *= kron_corr
+        for filt_i in images.filters:
+            self.objects[tile][f'f_auto_{filt_i}'] *= kron_corr
+            self.objects[tile][f'e_auto_{filt_i}'] *= kron_corr
 
         self.objects[tile]['kron_corr'] = kron_corr
         self.objects[tile]['kron1_a'] = a1 * pixel_scale
@@ -729,270 +1107,83 @@ class Catalog:
 
 
 
+    ############################################################################################################
+    ############################################## POST-PROCESSING #############################################
+    ############################################################################################################
 
-
-    def get_images(self, filt=None, tile=None):
-        """
-        Get a list of images corresponding to a given filter or tile (but not both, that's pointless). 
-        """
-        if filt is not None and tile is not None:
-            raise ValueError('get_images should be used separately for filters/tiles')
-        
-        elif filt is not None:
-            return list(self.images_flipped[filt].values())
-        
-        elif tile is not None:
-            return list(self.images[tile].values())
-        else:
-            raise ValueError('get_images: must specify filter or tile')
-
-
-    def generate_psfs(self, 
-        fwhm_min: float = 0.75, # minimum FWHM scale for PSF generation
-        fwhm_max: float = 1.75, # maximum FWHM scale for PSF generation
-        max_ellip: float = 0.1, # maximum ellipticity for PSF generation
-        min_snr: float = 8.0, # minimum SNR for PSF generation
-        max_snr: float = 1000.0, # minimum SNR for PSF generation
-        psf_size: int = 301, # size of PSF image, should be odd
-        checkplots: bool = False, # whether to generate checkplots during PSF generation
-        overwrite: bool = False, # whether to overwrite existing PSF files
-        plot: bool = False, # plot the final PSFs for inspection
-        az_average: bool = False,
-    ):
-
-        for filt in self.filters:
-            images = list(self.images_flipped[filt].values())
-            psf_files = [image.psf_file for image in images]
-
-            if len(images) == 1:
-                master_psf_file = None
-                if images[0].has_psf and not overwrite:
-                    print(f'All PSF files for {filt} already exist, skipping generation')
-                    continue
-
-            elif len(set(psf_files)) == 1:
-                # Build master PSF
-                master_psf_file = psf_files[0]
-                if os.path.exists(master_psf_file) and not overwrite:
-                    print(f'Master PSF for {filt} already exists, skipping generation')
-                    continue
-            else:
-                master_psf_file=None
-                all_exist = True
-                for psf_file in psf_files:
-                    all_exist = all_exist and os.path.exists(psf_file)
-                if all_exist and not overwrite:
-                    print(f'All PSF files for {filt} already exist, skipping generation')
-                    continue
-
-            # Build PSFs
-            from .psf import PSF
-            psf = PSF.build(
-                images=images,
-                fwhm_min=fwhm_min[filt],
-                fwhm_max=fwhm_max[filt],
-                max_ellip=max_ellip, 
-                min_snr=min_snr,
-                max_snr=max_snr,
-                checkplots=checkplots,
-                psf_size=psf_size,
-                overwrite=overwrite,
-                master_psf_file=master_psf_file,
-                az_average=az_average,
-            )
-            
-            if plot:
-                if len(images)==1:
-                    psf.plot(save=images[0].psf_file.replace('.fits','.png'))
-                elif master_psf_file:
-                    psf.plot(save=master_psf_file.replace('.fits','.png'))
-                    for image in images:
-                        psf = PSF(image.base_file + 'psf.fits')
-                        psf.plot(save=image.base_file + 'psf.png')
-                # for image in images:
-                #     psf.plot(save=image.psf_file.replace('.fits','.png'))
-
-    def _build_ivw_detection_image(
+    def merge_tiles(
         self, 
-        tile,
-        detection_bands: List[str], 
-        sigma_upper: float = 1.0,
-        maxiters: int = 3,
-        psfmatched: bool = True,
+        matching_radius: float = 0.1,
+        edge_mask: int = 300, # pixels
     ):
         """
-        Build a chi-squared detection image from a list of detection bands.
+        Merges the catalogs constructed from different tiles into one final catalog. 
 
         Args:
-        - detection_bands (List[str]): List of detection bands to use.
-        - sigma_upper (float): Sigma clipping threshold to esimate background rms.
-        - maxiters (int): Maximum number of iterations to use when fitting the pixel distribution.
+            matching_radius (float): radius, in arcsec, used to match sources in overlap regions
+            edge_mask (int): distance in pixels from the tile edge in which sources are assumed to be spurious
         """
+        if len(self.tiles)==1:
+            self.logger.info('Skipping merge_tiles, only one tile in catalog.')
+            self.objs_final = self.objects[self.tiles[0]]
+            return
 
-        print(f'Building IVW detection image for {tile}')
-
-        # # ensure all detection bands are available in this tile
-        # if not all(band in self.images[tile] for band in detection_bands):
-        #     raise ValueError(f'Not all detection bands are available in tile {tile}')
+        self.logger.info(f'Merging {len(self.tiles)} tiles')
         
-        # Check that the detection bands are all the same shape
-        shapes = []
-        for band in detection_bands:
-            shapes.append(self.images[tile][band].shape)
-        if len(set(shapes)) > 1:
-            raise ValueError(f'All detection bands must have the same shape.')
-        shape = shapes[0]
-
-        nbands = np.zeros(shape, dtype=int)
-        num, den = np.zeros(shape), np.zeros(shape)
-        for i, band in enumerate(detection_bands):
-            # make normalized science images by multiplying by square root of the weight images
-            if psfmatched:
-                sci = self.images[tile][band].psfmatched
-            else:
-                sci = self.images[tile][band].sci
-            wht = self.images[tile][band].wht # weight image
-
-            num += sci * wht
-            den += wht
-            num[wht == 0] = np.nan
-            nbands[np.isfinite(sci)&(wht > 0)] += 1
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            mask = nbands < len(detection_bands)
-            num[mask] = np.nan
-            den[mask] = np.nan
-            ivw = num/den
-            nivw = ivw * np.sqrt(den)
-
-                        
-
-        # fit pixel distribution of normalized science images to a Gaussian to get the rms
-        A, mu, sigma = _fit_pixel_distribution(
-            nivw, 
-            sigma_upper = sigma_upper, 
-            maxiters = maxiters
-        )
-
-        data = nivw.flatten()
-        data = data[np.isfinite(data)]
-        mean, median, std = sigma_clipped_stats(data, sigma=3.0, maxiters=3)
-        bins = np.linspace(median-5*std, median+5*std, 101)
+        tile0 = self.tiles[0]
+        objs0 = self.objects[tile0]
+        objs0['tile'] = tile0
         
-        # import matplotlib.pyplot as plt
-        # plt.figure()
-        # h, _ = np.histogram(data, bins=bins)
-        # h = h/np.max(h)
-        # plt.stairs(h, bins)
-        # x = np.linspace(np.min(bins), np.max(bins), 1000)
-        # plt.plot(x, gauss(x, A, mu, sigma), color='r')
-        # plt.savefig('test.pdf')
-        # plt.close()
+        # remove objects from objs0 if they are >edge_mask pixels from a boundary
+        detec = self.detection_images.get(tile=tile0)[0]
+        height0, width0 = detec.shape
+        objs0_distance_to_edge = distance_to_nearest_edge(objs0['x'], objs0['y'], width0, height0)
+        objs0 = objs0[objs0_distance_to_edge > edge_mask]
         
-        # make signal to noise images by dividing normalized science images by rms
-        # snr = (nivw - mu) / sigma
-        with warnings.catch_warnings(): 
-            warnings.simplefilter('ignore')    
-            detec_sci = (nivw - mu) / np.sqrt(den)
-            detec_err = sigma / np.sqrt(den)
+        self.logger.info(f'{tile0}: {len(objs0)} objects')
+        coords0 = SkyCoord(objs0['ra'], objs0['dec'], unit='deg')
 
-        return detec_sci, detec_err
+        for tile1 in self.tiles[1:]:
+            objs1 = self.objects[tile1]
+            objs1['tile'] = tile1
+
+            # remove objects from objs1 if they are >edge_mask pixels from a boundary
+            detec = self.detection_images.get(tile=tile1)[0]
+            height1, width1 = detec.shape
+            objs1_distance_to_edge = distance_to_nearest_edge(objs1['x'], objs1['y'], width1, height1)
+            objs1 = objs1[objs1_distance_to_edge > edge_mask]
+
+            self.logger.info(f'{tile1}: {len(objs1)} objects')
+            coords1 = SkyCoord(objs1['ra'], objs1['dec'], unit='deg')
+
+            # Perform matching
+            idx, d2d, d3d = coords0.match_to_catalog_sky(coords1)
+            match = d2d < matching_radius*u.arcsec # should have same LEN as objs0
+            objs0_unique = objs0[~match]
+            objs0_matched = objs0[match]
+            objs1_matched = objs1[idx[match]]
+            unique = np.ones(len(objs1), dtype=bool)
+            unique[idx[match]] = False
+            objs1_unique = objs1[unique]
+
+            # Handle matched cases:
+            assert len(objs0_matched)==len(objs1_matched)
+            objs0_distance_to_edge = distance_to_nearest_edge(objs0_matched['x'], objs0_matched['y'], width0, height0)
+            objs1_distance_to_edge = distance_to_nearest_edge(objs1_matched['x'], objs1_matched['y'], width1, height1)
+            which = np.argmax([objs0_distance_to_edge, objs1_distance_to_edge], axis=0)
+
+            objs1 = vstack([objs0_unique, objs0_matched[which==0], objs1_matched[which==1], objs1_unique], join_type='outer')
+
+            tile0 = tile1
+            objs0 = objs1
+            coords0 = SkyCoord(objs0['ra'], objs0['dec'], unit='deg')
+
+        self.logger.info(f'Final catalog: {len(objs1)} objects')
+        objs1['id'] = np.arange(len(objs1)).astype(int)
+        self.objs_final = objs1
 
 
-    def _build_chimean_detection_image(
-        self, 
-        detection_bands, 
-        **kwargs
-    ):
-        """
-        Build a chi-mean detection image from a list of detection bands.
-
-        Args:
-        - detection_bands (List[str]): List of detection bands to use.
-        - **kwargs: Additional keyword arguments to pass to _build_chisq_detection_image.
-        """
-
-        # make chi-sq image
-        chisq = self._build_chisq_detection_image(detection_bands, **kwargs)
-
-        n = np.zeros(chisq.shape)
-        for band in detection_bands:
-            isvalid = np.isfinite(self.science_images[band]) & (self.weight_images[band] > 0)
-            n += isvalid
-
-        from scipy.special import gamma
-        mu = np.sqrt(2) * gamma((n+1)/2) / gamma(n/2)
-        
-        chi_mean = (np.sqrt(chisq) - mu) / np.sqrt(n - mu**2)
-
-        return chi_mean
-
-    def build_detection_image(
-        self,
-        tile: str, 
-        file: str,
-        type: str, # ['ivw', 'chi-mean', 'chi-sq']
-        filters: List[str],
-        psfmatched: bool,
-        **kwargs
-    ):
-        if type == 'chi-mean':
-            return self._build_chimean_detection_image()
-        elif type == 'chi-sq':
-            return self._build_chisq_detection_image()
-        
-        # Inverse variance weighted detection image
-        elif type == 'ivw':
-            if not 'sigma_upper' in kwargs:
-                kwargs['sigma_upper'] = 1.0
-                print('Warning: `sigma_upper` not specified, defaulting to 1.0.')
-            if not 'maxiters' in kwargs:
-                kwargs['maxiters'] = 3
-                print('Warning: `maxiters` not specified, defaulting to 3.')
-
-            if not all([f in self.images[tile] for f in filters]):
-                raise ValueError(f'Tile {tile} does not have images for all detection bands {filters}')
-
-            detec_sci, detec_err = self._build_ivw_detection_image(
-                tile,
-                detection_bands=filters, 
-                sigma_upper=kwargs['sigma_upper'],
-                maxiters=kwargs['maxiters'],
-                psfmatched=psfmatched, 
-            )
-            
-            # Write out the detection image to a file
-            detec_sci = detec_sci.astype(self.images[tile][self.psfhom_filter].sci.dtype)
-            detec_err = detec_err.astype(self.images[tile][self.psfhom_filter].sci.dtype)
-            detec_wcs = self.images[tile][self.psfhom_filter].wcs
-            self.detection_images[tile] = {'sci': detec_sci, 'err': detec_err, 'wcs': detec_wcs}
-            
-            hdr = self.images[tile][self.psfhom_filter].hdr # use the header from the psf-homogenization filter
-            sci_file = file.replace('.fits', '_sci.fits')
-            err_file = file.replace('.fits', '_err.fits')
-            fits.writeto(sci_file, detec_sci, header=hdr, overwrite=True)
-            fits.writeto(err_file, detec_err, header=hdr, overwrite=True)
-        
-        else:
-            raise ValueError(f'Invalid detection image type: {type}. Must be one of ["ivw", "chi-mean", "chi-sq"].')
-        
-            
-        
-
-    def load_detection_image(self, tile, file: str):
-        sci_file = file.replace('[ext]', 'sci')
-        err_file = file.replace('[ext]', 'err')
-        print(f'Loading existing detection image for {tile}: {os.path.basename(sci_file)}')
-        detec_sci = fits.getdata(sci_file)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            detec_wcs = WCS(fits.getheader(sci_file))
-        detec_err = fits.getdata(err_file)
-        self.detection_images[tile] = {'sci': detec_sci, 'err': detec_err, 'wcs': detec_wcs}
-            
-
-    def measure_random_aperture_scaling(
+    def _measure_random_aperture_scaling(
         self,
         filt, 
         min_radius: float, 
@@ -1002,43 +1193,48 @@ class Catalog:
         output_dir: str,
         plot: bool = False,
         overwrite: bool = False,
-        psfmatched: bool = False,
+        psfhom: bool = False,
         min_num_apertures_per_sq_arcmin: int = 30,
     ):
 
-        if psfmatched:
-            output_file = os.path.join(output_dir, f'randomApertures_{filt}_psfmatched_coeffs.pickle')
+        if psfhom:
+            output_file = os.path.join(output_dir, 'random_apertures', f'randomApertures_{filt}_psfhom_coeffs.pickle')
         else:
-            output_file = os.path.join(output_dir, f'randomApertures_{filt}_coeffs.pickle')
+            output_file = os.path.join(output_dir, 'random_apertures', f'randomApertures_{filt}_coeffs.pickle')
 
         if os.path.exists(output_file) and not overwrite:
-            print(f'Skipping random aperture measurement for {filt}')
+            self.logger.info(f'Skipping random aperture measurement for {filt}')
             return
 
-        if psfmatched:
-            print(f'Measuring random aperture scaling for {filt}, psf-matched')
+        if psfhom:
+            self.logger.info(f'Measuring random aperture scaling for {filt} (psf-homogenized)')
         else:
-            print(f'Measuring random aperture scaling for {filt}')
+            self.logger.info(f'Measuring random aperture scaling for {filt} (native resolution)')
 
         index = 2
         aperture_diameters = np.power(np.linspace(np.power(min_radius*2, 1/index), np.power(max_radius*2, 1/index), num_radii), index)
 
-        images = self.get_images(filt=filt)
+        images = self.images.get(filter=filt)
 
-        print('Fitting pixel distribution')
+        self.logger.info('Fitting pixel distribution')
         nrandom_pixels_per_tile = 50000
         fluxes = np.zeros(nrandom_pixels_per_tile*len(images))
         i = 0
         for image in tqdm.tqdm(images):
-            pix = image.get_background_pixels(psfmatched)
-            pix = np.random.choice(pix, size=nrandom_pixels_per_tile)
-            fluxes[i:i+nrandom_pixels_per_tile] = pix
+            if psfhom: 
+                nsci = image.hom * np.sqrt(image.wht)
+            else:
+                nsci = image.sci * np.sqrt(image.wht)
+            nsci[image.wht == 0] = np.nan
+            nsci = nsci[np.isfinite(nsci)]
+            nsci = np.random.choice(nsci, size=nrandom_pixels_per_tile)
+            fluxes[i:i+nrandom_pixels_per_tile] = nsci
             i += nrandom_pixels_per_tile
 
         _, _, rms1 = _fit_pixel_distribution(fluxes, sigma_upper=1.0, maxiters=5) 
 
 
-        print('Getting random aperture fluxes')
+        self.logger.info('Getting random aperture fluxes')
         # num_apertures_total = sum([int(num_apertures_per_sq_arcmin * image.area) for image in images])
         fluxes = {i:[] for i in range(len(aperture_diameters))}
         fluxes_random = {i:[] for i in range(len(aperture_diameters))}
@@ -1046,10 +1242,11 @@ class Catalog:
 
         for image in tqdm.tqdm(images):
 
-            if psfmatched: 
-                nsci = image.psfmatched * np.sqrt(image.wht)
+            if psfhom: 
+                nsci = image.hom * np.sqrt(image.wht)
             else:
                 nsci = image.sci * np.sqrt(image.wht)
+            nsci[image.wht == 0] = np.nan
 
             nsci_random = np.random.normal(loc=0, scale=rms1_random, size=nsci.shape)
 
@@ -1083,11 +1280,8 @@ class Catalog:
                 
                 tbl = aperture_photometry(nsci_random, aperture)
                 fluxes_random[i].extend(list(tbl['aperture_sum']))
-
-
-
-
-        print('Fitting distribution')
+        
+        self.logger.info('Fitting distribution')
         rmsN = np.zeros(num_radii)
         rmsN_err = np.zeros(num_radii)
         
@@ -1103,8 +1297,7 @@ class Catalog:
             rmsN_random[i] = np.std(np.array(fluxes_random[i]))
             rmsN_err_random[i] = 0
 
-
-        print('Fitting curve')        
+        self.logger.info('Fitting curve')        
         N = np.pi*(aperture_diameters/2/pixel_scale)**2
         sqrtN = np.sqrt(N)
         conversion = images[0]._compute_unit_conv('nJy')
@@ -1148,11 +1341,14 @@ class Catalog:
 
 
         if plot:
-            print('Plotting')
+            self.logger.info('Plotting')
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(3.5,3), constrained_layout=True)
             
-            ax.errorbar(sqrtN, rmsN/rms1, yerr=rmsN_err/rms1, linewidth=0, marker='s', mfc='none', mec='k', mew=0.8, ms=5, elinewidth=0.6, ecolor='k', capsize=1.5, capthick=0.6, zorder=1000)
+            ax.errorbar(sqrtN, rmsN/rms1, yerr=rmsN_err/rms1, 
+                linewidth=0, marker='s', mfc='none', mec='k', 
+                mew=0.8, ms=5, elinewidth=0.6, ecolor='k', 
+                capsize=1.5, capthick=0.6, zorder=1000)
             x = np.linspace(0, 1.1*np.max(sqrtN), 1000)
             
             y = bspline(x)
@@ -1164,11 +1360,12 @@ class Catalog:
             def func(N, alpha, beta):
                 return alpha*np.power(N, beta)
             popt, pcov = curve_fit(func, N, rmsN_random/rms1_random, p0=[1,1], maxfev=int(1e5))
-            ax.errorbar(sqrtN, rmsN_random/rms1_random, yerr=rmsN_err_random/rms1_random, linewidth=0, marker='s', mfc='none', mec='0.7', mew=0.8, ms=5, elinewidth=0.6, ecolor='0.7', capsize=1.5, capthick=0.6, zorder=1000)
+            ax.errorbar(sqrtN, rmsN_random/rms1_random, yerr=rmsN_err_random/rms1_random, 
+                linewidth=0, marker='s', mfc='none', mec='0.7', mew=0.8, ms=5, 
+                elinewidth=0.6, ecolor='0.7', capsize=1.5, capthick=0.6, zorder=1000)
             x = np.linspace(0, 1.1*np.max(sqrtN), 1000)
             y = func(x**2,*popt)
             ax.plot(x, y, color='lightblue')
-
 
             ax.set_xlim(0, np.max(np.sqrt(N))*1.1)
             ax.set_ylim(-0.03*np.max(rmsN/rms1), 1.1*np.max(rmsN/rms1))
@@ -1177,15 +1374,65 @@ class Catalog:
 
             ax.legend(loc='upper left', title=filt.upper(), frameon=False)
 
-            ax.annotate('Gaussian random field', (0.95,0.05), xycoords='axes fraction', ha='right', va='bottom', color='0.7')
+            ax.annotate('Gaussian random field', (0.95,0.05), 
+            xycoords='axes fraction', ha='right', va='bottom', color='0.7')
 
-            out = os.path.join(os.path.dirname(output_file), 'plots', os.path.basename(output_file).replace('_coeffs.pickle', '.pdf'))
-            print(f'Saving to {out}')
+            out = os.path.join(
+                output_dir, 'plots', 
+                os.path.basename(output_file).replace('_coeffs.pickle', '.pdf')
+            )
+            self.logger.info(f'Saving to {out}')
             plt.savefig(out)
             plt.close()
 
+
+    def measure_random_aperture_scaling(
+        self,
+        min_radius: float, 
+        max_radius: float, 
+        num_radii: int,
+        num_apertures_per_sq_arcmin: int,
+        output_dir: str,
+        plot: bool = False,
+        overwrite: bool = False,
+        min_num_apertures_per_sq_arcmin: int = 30,
+    ):
+
+        for filt in self.filters:
+            filter_hom = (self.has_aper_hom or self.has_auto)
+            filter_hom = filter_hom and filt != self.psfhom_target_filter and filt not in self.psfhom_inverse_filters
+
+            if self.has_aper_nat or not filter_hom:
+                self._measure_random_aperture_scaling(
+                    filt, 
+                    min_radius = min_radius,
+                    max_radius = max_radius,
+                    num_radii = num_radii,
+                    num_apertures_per_sq_arcmin = num_apertures_per_sq_arcmin,
+                    plot = plot,
+                    overwrite = overwrite,
+                    output_dir = output_dir,
+                    psfhom = False,
+                )
+            
+            if filter_hom:
+                self._measure_random_aperture_scaling(
+                    filt, 
+                    min_radius = min_radius,
+                    max_radius = max_radius,
+                    num_radii = num_radii,
+                    num_apertures_per_sq_arcmin = num_apertures_per_sq_arcmin,
+                    plot = plot,
+                    overwrite = overwrite,
+                    output_dir = output_dir,
+                    psfhom = True,
+                )
+
     @staticmethod
-    def _get_random_aperture_curve(sqrtN, coeff_file):
+    def _get_random_aperture_curve(
+        sqrtN: npt.ArrayLike,
+        coeff_file: str
+    ) -> np.ndarray:
         with open(coeff_file, 'rb') as f:
             coeffs = pickle.load(f)
 
@@ -1210,8 +1457,8 @@ class Catalog:
 
     def apply_random_aperture_error_calibration(self, coeff_dir):
         for filt in self.filters:
-            print(f'Applying random aperture calibration for {filt}')
-            pixel_scale = self.get_images(filt=filt)[0].pixel_scale
+            self.logger.info(f'Applying random aperture calibration for {filt}')
+            pixel_scale = self.images.get(filter=filt)[0].pixel_scale
 
             wht = self.objs_final[f'wht_{filt}']
             
@@ -1220,31 +1467,37 @@ class Catalog:
             if self.has_aper:
                 sqrtN_aper = np.sqrt(np.pi)*np.array(self.aperture_diameters)/pixel_scale/2
 
-            if self.has_aper_native:
+            if self.has_aper_nat:
                 # native resolution aperture photometry
-                coeff_file = os.path.join(coeff_dir, f'randomApertures_{filt}_coeffs.pickle')
+                coeff_file = os.path.join(coeff_dir, 'random_apertures', f'randomApertures_{filt}_coeffs.pickle')
                 result = self._get_random_aperture_curve(sqrtN_aper, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     rmsN = np.outer(1/np.sqrt(wht), result)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
-                self.objs_final.rename_column(f'e_aper_native_{filt}', f'e_aper_native_{filt}_uncal')
-                self.objs_final[f'e_aper_native_{filt}'] = np.sqrt(self.objs_final[f'e_aper_native_{filt}_uncal']**2 + rmsN**2)
+                self.objs_final.rename_column(f'e_aper_nat_{filt}', f'e_aper_nat_{filt}_uncal')
+                self.objs_final[f'e_aper_nat_{filt}'] = np.sqrt(self.objs_final[f'e_aper_nat_{filt}_uncal']**2 + rmsN**2)
             
-            if self.has_aper_psfmatched:
+            if self.has_aper_hom:
                 # psf-matched aperture photometry
-                coeff_file = os.path.join(coeff_dir, f'randomApertures_{filt}_psfmatched_coeffs.pickle')
+                if filt == self.psfhom_target_filter or filt in self.psfhom_inverse_filters:
+                    coeff_file = os.path.join(coeff_dir, 'random_apertures', f'randomApertures_{filt}_coeffs.pickle')
+                else:
+                    coeff_file = os.path.join(coeff_dir, 'random_apertures', f'randomApertures_{filt}_psfhom_coeffs.pickle')
                 result = self._get_random_aperture_curve(sqrtN_aper, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     rmsN = np.outer(1/np.sqrt(wht), result)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
-                self.objs_final.rename_column(f'e_aper_psfmatched_{filt}', f'e_aper_psfmatched_{filt}_uncal')
-                self.objs_final[f'e_aper_psfmatched_{filt}'] = np.sqrt(self.objs_final[f'e_aper_psfmatched_{filt}_uncal']**2 + rmsN**2)
+                self.objs_final.rename_column(f'e_aper_hom_{filt}', f'e_aper_hom_{filt}_uncal')
+                self.objs_final[f'e_aper_hom_{filt}'] = np.sqrt(self.objs_final[f'e_aper_hom_{filt}_uncal']**2 + rmsN**2)
 
             if self.has_auto:
                 # auto (kron) photometry
-                coeff_file = os.path.join(coeff_dir, f'randomApertures_{filt}_psfmatched_coeffs.pickle')
+                if filt == self.psfhom_target_filter or filt in self.psfhom_inverse_filters:
+                    coeff_file = os.path.join(coeff_dir, 'random_apertures', f'randomApertures_{filt}_coeffs.pickle')
+                else:
+                    coeff_file = os.path.join(coeff_dir, 'random_apertures', f'randomApertures_{filt}_psfhom_coeffs.pickle')
                 result = self._get_random_aperture_curve(sqrtN_kron, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
@@ -1254,65 +1507,21 @@ class Catalog:
                 self.objs_final[f'e_auto_{filt}'] = np.sqrt(self.objs_final[f'e_auto_{filt}_uncal']**2 + rmsN**2)
 
 
-    def plot_detections():
-        from regions import Regions, EllipseSkyRegion
-        print(datetime.now().strftime('%H:%M:%S') + ': ' + 'Plotting apertures + segmap checkplot...')
-        cmap2 = make_random_cmap(len(objs)+1)
-        cmap2.colors[0] = colors.to_rgba(background_color)
-        fig, ax = plt.subplots(1,2,figsize=(14,10),sharex=True,sharey=True)
-        ax[0].imshow(np.log10(detec_sci), vmin=0, vmax=2.5, cmap=cmap1)
-        ax[1].imshow(segmap, cmap=cmap2)
-
-        regs = []
-        center_sky = detec_wcs.pixel_to_world(objs['x'], objs['y'])
-        width_sky = 2.5*kronrad*objs['a']*0.03
-        height_sky = 2.5*kronrad*objs['b']*0.03
-        for i in range(len(objs)):
-            reg = EllipseSkyRegion(center=center_sky[i], width=width_sky[i]*u.arcsec, height=height_sky[i]*u.arcsec, angle=(np.degrees(objs['theta'][i])+20)*u.deg)
-
-            e = Ellipse(xy=(objs['x'][i], objs['y'][i]), 
-                        width=2.5*kronrad[i]*objs['a'][i], height=2.5*kronrad[i]*objs['b'][i], angle=np.degrees(objs['theta'][i]))
-            e.set_facecolor('none')
-            e.set_linewidth(0.15)
-            if objs['mode'][i]=='cold':
-                e.set_edgecolor('lime')
-                reg.visual['color'] = 'green'
-            else:
-                e.set_edgecolor('lightblue')
-                reg.visual['color'] = 'lightblue'
-            if objs['flag'][i]>1:
-                e.set_edgecolor('r')
-                reg.visual['color'] = 'red'
-            ax[0].add_artist(e)
-            regs.append(reg)
-        ax[0].axis('off')
-        ax[1].axis('off')
-        plt.savefig(f'/Dropbox/research/COSMOS-Web/catalog/checkplots/checkplot_apertures+segm_hot+cold_{tile}_{version}.pdf', 
-                    dpi=1000)
-        plt.close()
-
-        regs = Regions(regs)
-        regs.write(f'/Dropbox/research/COSMOS-Web/catalog/checkplots/regions_{tile}_{version}.reg', format='ds9', overwrite=True)
-
-    # fits.writeto(detection_image_filename.replace('.fits','_segm.fits'), data=segmap, header=detec_hdr, overwrite=True)
-
 
     def compute_psf_corr_grid(
         self, 
-        band,
+        filt,
         output_dir, 
         plot = False, 
         overwrite = False,
     ):
-        if band != self.psfhom_filter:
-            raise ValueError('Why are we computing PSF corrections for anything other than the target filter?')
             
-        output_file = os.path.join(output_dir, f'{band}_psf_corr_grid.txt')
+        output_file = os.path.join(output_dir, f'{filt}_psf_corr_grid.txt')
         if os.path.exists(output_file) and not overwrite:
-            print(f'Skipping computing PSF correction for {band}')
+            self.logger.info(f'Skipping computing PSF correction for {filt}')
             return output_file
 
-        print(f'Computing PSF correction for {band}')
+        self.logger.info(f'Computing PSF correction for {filt}')
 
         from photutils.aperture import EllipticalAperture, aperture_photometry
 
@@ -1321,7 +1530,7 @@ class Catalog:
         a = np.linspace(0.05, 2.0, 50)
         q = np.linspace(0.05, 1, 50)
         
-        psf = self.get_images(filt=band)[0].psf
+        psf = self.images.get(filter=filt)[0].psf
         pixel_scale = psf.pixel_scale
         a /= pixel_scale
         psf = psf.data
@@ -1359,7 +1568,7 @@ class Catalog:
             ax.set_ylabel('axis ratio $q$')
             ax = fig.add_subplot(gs[1])
             fig.colorbar(im, cax=ax, label='PSF correction')
-            plt.savefig(os.path.join(output_dir, 'plots', f'{band}_psf_corr_grid.pdf'))
+            plt.savefig(os.path.join(output_dir, 'plots', f'{filt}_psf_corr_grid.pdf'))
             plt.close()
 
         return output_file
@@ -1368,129 +1577,40 @@ class Catalog:
     def apply_psf_corrections(
         self,
         psf_corr_file, 
-        bands, 
     ):
-        print(f'Applying PSF correction for {bands}')
         from scipy.interpolate import griddata
 
-        for band in bands:
-            if not band in self.filters:
-                raise ValueError
+        a, q, c = np.loadtxt(psf_corr_file).T
 
-        for tile in self.tiles:
+        if self.has_auto:
+            self.logger.info(f'Applying PSF corrections for auto photometry')
+            ai = self.objs_final['kron2_a']
+            bi = self.objs_final['kron2_b']
+            qi = bi/ai
+            kron_psf_corr = griddata(np.array([a,q]).T, c, (ai,qi), fill_value=1.0)
+            for filt in self.filters:
+                self.objs_final[f'f_auto_{filt}'] *= kron_psf_corr
+                self.objs_final[f'e_auto_{filt}'] *= kron_psf_corr
+        if self.has_aper_hom:
+            self.logger.info(f'Applying PSF corrections for aper_hom photometry')
+            aperture_diameters = np.array(self.aperture_diameters)
+            aper_psf_corr = griddata(np.array([a,q]).T, c, (aperture_diameters/2, [1]*len(aperture_diameters)), fill_value=1.0)
+            for filt in self.filters:
+                self.objs_final[f'f_aper_hom_{filt}'] *= aper_psf_corr
+                self.objs_final[f'e_aper_hom_{filt}'] *= aper_psf_corr
 
-            a, q, c = np.loadtxt(psf_corr_file).T
-
-            if self.has_auto:
-                ai = self.objects[tile]['kron2_a']
-                bi = self.objects[tile]['kron2_b']
-                qi = bi/ai
-                kron_psf_corr = griddata(np.array([a,q]).T, c, (ai,qi), fill_value=1.0)
-                for band in bands:
-                    self.objects[tile][f'f_auto_{band}'] *= kron_psf_corr
-                    self.objects[tile][f'e_auto_{band}'] *= kron_psf_corr
-            if self.has_aper_psfmatched:
-                aperture_diameters = np.array(self.aperture_diameters)
-                aper_psf_corr = griddata(np.array([a,q]).T, c, (aperture_diameters/2, [1]*len(aperture_diameters)), fill_value=1.0)
-                for band in bands:
-                    self.objects[tile][f'f_aper_psfmatched_{band}'] *= aper_psf_corr
-                    self.objects[tile][f'e_aper_psfmatched_{band}'] *= aper_psf_corr
-            # if self.has_aper_native:
-                # raise ValueError('Need to handle this case more carefully...')
-                # aper_psf_corr = griddata(np.array([a,q]).T, c, (self.aperture_diameters/2, [1]*len(self.aperture_diameters)), fill_value=1.0)
-                # for band in bands:
-                #     self.objects[tile][f'f_aper_psfmatched_{band}'] *= aper_psf_corr
-                #     self.objects[tile][f'e_aper_psfmatched_{band}'] *= aper_psf_corr
-    
-
-    def merge_tiles(
+    def write(
         self, 
-        matching_radius = 0.1,
-        edge_mask = 300, # pixels
+        output_file,
+        tile=None,
     ):
-        from astropy.coordinates import SkyCoord
-        
-        def distance_to_nearest_edge(x, y, image_width, image_height):
-            """
-            Compute the distance to the nearest edge for a point (x, y) in an image.
-
-            Parameters:
-            x (float): X-coordinate of the point.
-            y (float): Y-coordinate of the point.
-            image_width (int): Width of the image.
-            image_height (int): Height of the image.
-
-            Returns:
-            float: Distance to the nearest edge.
-            """
-            left_edge_dist = x
-            right_edge_dist = image_width - x
-            top_edge_dist = y
-            bottom_edge_dist = image_height - y
-
-            if np.ndim(x)==1:
-                return np.min([left_edge_dist, right_edge_dist, top_edge_dist, bottom_edge_dist], axis=0)
-            else:
-                return min(left_edge_dist, right_edge_dist, top_edge_dist, bottom_edge_dist)
-
-
-        print(f'Merging {len(self.tiles)} tiles...')
-
-        tile0 = self.tiles[0]
-        objs0 = self.objects[tile0]
-        objs0['tile'] = tile0
-        
-        # remove objects from objs0 if they are >edge_mask pixels from a boundary
-        height0, width0 = np.shape(self.detection_images[tile0]['sci'])
-        objs0_distance_to_edge = distance_to_nearest_edge(objs0['x'], objs0['y'], width0, height0)
-        objs0 = objs0[objs0_distance_to_edge > edge_mask]
-        
-        print(tile0, len(objs0))
-        coords0 = SkyCoord(objs0['ra'], objs0['dec'], unit='deg')
-
-
-        for tile1 in self.tiles[1:]:
-            objs1 = self.objects[tile1]
-            objs1['tile'] = tile1
-
-            # remove objects from objs1 if they are >edge_mask pixels from a boundary
-            height1, width1 = np.shape(self.detection_images[tile1]['sci'])
-            objs1_distance_to_edge = distance_to_nearest_edge(objs1['x'], objs1['y'], width1, height1)
-            objs1 = objs1[objs1_distance_to_edge > edge_mask]
-
-            print(tile1, len(objs1))
-            coords1 = SkyCoord(objs1['ra'], objs1['dec'], unit='deg')
-
-            # Perform matching
-            idx, d2d, d3d = coords0.match_to_catalog_sky(coords1)
-            match = d2d < matching_radius*u.arcsec # should have same LEN as objs0
-            objs0_unique = objs0[~match]
-            objs0_matched = objs0[match]
-            objs1_matched = objs1[idx[match]]
-            unique = np.ones(len(objs1), dtype=bool)
-            unique[idx[match]] = False
-            objs1_unique = objs1[unique]
-
-            # # Handle matched cases:
-            assert len(objs0_matched)==len(objs1_matched)
-            objs0_distance_to_edge = distance_to_nearest_edge(objs0_matched['x'], objs0_matched['y'], width0, height0)
-            objs1_distance_to_edge = distance_to_nearest_edge(objs1_matched['x'], objs1_matched['y'], width1, height1)
-            which = np.argmax([objs0_distance_to_edge, objs1_distance_to_edge], axis=0)
-
-            objs1 = vstack([objs0_unique, objs0_matched[which==0], objs1_matched[which==1], objs1_unique], join_type='exact')
-
-            tile0 = tile1
-            objs0 = objs1
-            coords0 = SkyCoord(objs0['ra'], objs0['dec'], unit='deg')
-
-        print(len(objs1))
-        objs1['id'] = np.arange(len(objs1)).astype(int)
-        self.objs_final = objs1
-
-    def write(self, 
-        output_file
-    ):
-        self.objs_final.write(output_file, overwrite=True)
+        if tile is not None: 
+            # Write output for specific tile
+            self.logger.info(f'Writing tile {tile} catalog to {output_file}')
+            self.objects[tile].write(output_file, overwrite=True)
+        else:
+            self.logger.info(f'Writing final, merged catalog to {output_file}')
+            self.objs_final.write(output_file, overwrite=True)
 
 
     @property
@@ -1502,21 +1622,22 @@ class Catalog:
         return not self.objects == {}
 
     @property
+    def has_auto(self):
+        return hasattr(self, '_auto')
+    
+    @property
+    def has_aper_nat(self):
+        return hasattr(self, '_aper_nat')
+    
+    @property
+    def has_aper_hom(self):
+        return hasattr(self, '_aper_hom')
+
+    @property
     def has_photometry(self):
-        return self.has_auto or self.has_aper_native or self.has_aper_psfmatched
+        return self.has_auto or self.has_aper_nat or self.has_aper_hom
     
     @property
     def has_aper(self):
-        return self.has_aper_native or self.has_aper_psfmatched
+        return self.has_aper_nat or self.has_aper_hom
 
-
-# fig, ax = plt.subplots()
-# for tile in np.unique(t['tile']):
-#     ax.scatter(t['ra'][t['tile']==tile], t['dec'][t['tile']==tile], label=tile)
-# p = mpl.patches.Polygon(b1v, facecolor='none', edgecolor='k')
-# ax.add_patch(p)
-# p = mpl.patches.Polygon(b2v, facecolor='none', edgecolor='k')
-# ax.add_patch(p)
-# ax.invert_xaxis()
-# plt.legend()
-# plt.show()
