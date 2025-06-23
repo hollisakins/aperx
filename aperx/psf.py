@@ -427,7 +427,11 @@ class PSF:
                 snr < max_snr, 
                 ellip < max_ellip,
             ))
-            logger.info(f'\t Identified {len(cond[cond])} PSF stars')
+            if len(cond[cond]) == 0:
+                logger.warning(f'\t Could not identify any PSF stars')
+                continue
+            else:
+                logger.info(f'\t Identified {len(cond[cond])} PSF stars')
 
             psf_file = image.base_file + 'psf.fits'
 

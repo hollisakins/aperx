@@ -178,8 +178,11 @@ class Catalog:
                 elif master_psf_file:
                     psf.plot(save=master_psf_file.replace('.fits','.png'))
                     for image in images:
-                        psf = PSF(image.base_file + 'psf.fits', logger=self.logger)
-                        psf.plot(save=image.base_file + 'psf.png')
+                        try:
+                            psf = PSF(image.base_file + 'psf.fits', logger=self.logger)
+                            psf.plot(save=image.base_file + 'psf.png')
+                        except FileNotFoundError:
+                            pass
 
     def generate_psfhomogenized_images(
         self, 
