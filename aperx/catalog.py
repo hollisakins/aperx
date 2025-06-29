@@ -19,6 +19,9 @@ from astropy.table import Table, vstack
 from photutils.aperture import aperture_photometry, CircularAperture, ApertureStats
 from astropy.coordinates import SkyCoord
 
+from multiprocessing import Pool
+from functools import partial
+
 import sep
 sep.set_extract_pixstack(int(1e7))
 sep.set_sub_object_limit(4096)
@@ -175,7 +178,7 @@ def merge_catalogs(
         catalog = catalogs[tile]
         # Create merged catalog with the single tile's data
         merged_catalog = Catalog(catalog.images, flux_unit=catalog.flux_unit)
-        merged_catalog.objs_final = catalog.objects[tile]
+        merged_catalog.objects = catalog.objects[tile]
         merged_catalog.detection_images = catalog.detection_images
         return merged_catalog
 
@@ -184,11 +187,11 @@ def merge_catalogs(
     # Start with first catalog
     tile0 = tile_names[0]
     catalog0 = catalogs[tile0]
-    objs0 = catalog0.objects[tile0].copy()
+    objs0 = catalog0.objects.copy()
     objs0['tile'] = tile0
     
     # Remove objects too close to tile edges
-    detec0 = catalog0.detection_images.get(tile=tile0)[0]
+    detec0 = catalog0.detection_image
     height0, width0 = detec0.shape
     objs0_distance_to_edge = distance_to_nearest_edge(objs0['x'], objs0['y'], width0, height0)
     objs0 = objs0[objs0_distance_to_edge > edge_mask]
@@ -199,11 +202,11 @@ def merge_catalogs(
     # Merge with remaining catalogs
     for tile1 in tile_names[1:]:
         catalog1 = catalogs[tile1]
-        objs1 = catalog1.objects[tile1].copy()
+        objs1 = catalog1.objects.copy()
         objs1['tile'] = tile1
 
         # Remove objects too close to tile edges
-        detec1 = catalog1.detection_images.get(tile=tile1)[0]
+        detec1 = catalog1.detection_image
         height1, width1 = detec1.shape
         objs1_distance_to_edge = distance_to_nearest_edge(objs1['x'], objs1['y'], width1, height1)
         objs1 = objs1[objs1_distance_to_edge > edge_mask]
@@ -249,13 +252,23 @@ def merge_catalogs(
     # Combine all images from all catalogs
     all_images = Images([])
     all_detection_images = Images([])
-    
+
     for catalog in catalogs.values():
         all_images += catalog.images
-        all_detection_images += catalog.detection_images
+        all_detection_images += catalog.detection_image
     
     merged_catalog = Catalog(all_images, flux_unit=catalog0.flux_unit)
+    merged_catalog.detection_images = all_detection_images
     merged_catalog.objects = objs_merged
+    merged_catalog.psfhom_target_filter = catalog.psfhom_target_filter
+    merged_catalog.metadata['psfhom_target_filter'] = merged_catalog.psfhom_target_filter
+    merged_catalog.psfhom_inverse_filters = catalog.psfhom_inverse_filters
+    merged_catalog.metadata['psfhom_inverse_filters'] = merged_catalog.psfhom_inverse_filters
+    merged_catalog.aperture_diameters = catalog.aperture_diameters
+    merged_catalog.metadata['aperture_diameters'] = merged_catalog.aperture_diameters
+    merged_catalog.metadata['detec_sci'] = all_detection_images[0].sci_file.replace(all_detection_images[0].tile, '[tile]')
+    merged_catalog.metadata['detec_err'] = all_detection_images[0].err_file.replace(all_detection_images[0].tile, '[tile]')
+    merged_catalog.metadata['detec_seg'] = all_detection_images[0].seg_file.replace(all_detection_images[0].tile, '[tile]')
     
     return merged_catalog
 
@@ -294,22 +307,131 @@ class Catalog:
         self,
         images: Images,
         flux_unit: str = 'uJy', 
+        tile: str = "None", 
     ):
 
         self.images = images
         self.filters = copy(sorted(self.images.filters))
 
         self.flux_unit = flux_unit
+        self.tile = tile
         self.memmap = images.memmap
 
         self.detection_image = None
-        self.objects = {}
+        self.objects = None
     
         self.logger = utils.setup_logger(name='aperx.catalog')
 
+        self.metadata = {}
+        self.metadata['tile'] = self.tile
+        self.metadata['flux_unit'] = self.flux_unit
+
     @classmethod
     def load(cls, file):
-        pass
+        header = fits.getheader(file, ext=0)
+        
+        objects = Table.read(file, hdu=1)
+        images_table = Table.read(file, hdu=2)
+        images = []
+        for t in images_table:
+            im = Image(
+                filter = t['filter'],
+                tile = t['tile'],
+                sci_file = t['sci_file'],
+                err_file = t['err_file'],
+                wht_file = t['wht_file'],
+                hom_file = t['hom_file'],
+                psf_file = t['psf_file'],
+                seg_file = t['seg_file'],
+                memmap = t['memmap'],
+                sci_extension = t['sci_extension'],
+                err_extension = t['err_extension'],
+                wht_extension = t['wht_extension'],
+                psf_extension = t['psf_extension'],
+            )
+            images.append(im)
+        images = Images(images)
+
+        cat = cls(images)
+        cat.objects = objects
+
+        cat.metadata = cat.header_to_metadata(header)
+        cat.tile = cat.metadata['tile']
+        cat.flux_unit = cat.metadata['flux_unit']
+        cat.psfhom_target_filter = cat.metadata['psfhom_target_filter']
+        cat.psfhom_inverse_filters = cat.metadata['psfhom_inverse_filters']
+        cat.aperture_diameters = cat.metadata['aperture_diameters']
+        cat._load_detection_image(cat.metadata['detec_sci'], cat.metadata['detec_sci'], cat.metadata['detec_seg'])
+
+        return cat
+
+    def write(
+        self, 
+        output_file,
+    ):
+        self.logger.info(f'Writing catalog to {output_file}')
+        header = self.metadata_to_header(self.metadata)
+        from astropy.io import fits
+        hdul = fits.HDUList([
+            fits.PrimaryHDU(header=header),
+            fits.table_to_hdu(self.objects),
+            fits.table_to_hdu(self.images_table), 
+        ])
+        hdul.writeto(output_file, overwrite=True)
+
+    @staticmethod
+    def metadata_to_header(metadata: dict):
+        header = {}
+        header['TILE'] = metadata['tile']
+        header['FLUXUNIT'] = metadata['flux_unit']
+        header['PSF_TARG'] = metadata['psfhom_target_filter']
+        header['PSF_INV'] = ", ".join(metadata['psfhom_inverse_filters']) if len(metadata['psfhom_inverse_filters'])>1 else ""
+        header['AP_DIAM'] = ", ".join([str(round(d,3)) for d in metadata['aperture_diameters']]) if 'aperture_diameters' in metadata else "None"
+        header['DETECSCI'] = metadata['detec_sci']
+        header['DETECERR'] = metadata['detec_sci']
+        header['DETECSEG'] = metadata['detec_seg']
+        return fits.Header(header)
+    
+    @staticmethod
+    def header_to_metadata(header: fits.Header):
+        metadata = {}
+        metadata['tile'] = header['TILE']
+        metadata['flux_unit'] = header['FLUXUNIT']
+        metadata['psfhom_target_filter'] = str(header['PSF_TARG'])
+        metadata['psfhom_inverse_filters'] = str(header['PSF_INV']).split(', ') if len(str(header['PSF_INV'])) > 1 else []
+        metadata['aperture_diameters'] = [float(d) for d in str(header['AP_DIAM']).split(', ')]
+        metadata['detec_sci'] = header['DETECSCI']
+        metadata['detec_sci'] = header['DETECERR']
+        metadata['detec_seg'] = header['DETECSEG']
+        return metadata
+
+
+    @property 
+    def images_table(self):
+        t = {
+            'filter':[], 'tile':[], 
+            'sci_file':[], 'err_file':[], 'wht_file':[], 
+            'hom_file':[], 'psf_file':[], 'seg_file':[],
+            'memmap':[],'sci_extension':[], 'err_extension':[], 
+            'wht_extension':[], 'psf_extension':[],
+        }
+        for image in self.images:
+            t['filter'].append(str(image.filter))
+            t['tile'].append(str(image.tile))
+            t['sci_file'].append(str(image.sci_file))
+            t['err_file'].append(str(image.err_file))
+            t['wht_file'].append(str(image.wht_file))
+            t['hom_file'].append(str(image.hom_file))
+            t['psf_file'].append(str(image.psf_file))
+            t['seg_file'].append(str(image.seg_file))
+            t['memmap'].append(str(image.memmap))
+            t['sci_extension'].append(str(image.sci_extension))
+            t['err_extension'].append(str(image.err_extension))
+            t['wht_extension'].append(str(image.wht_extension))
+            t['psf_extension'].append(str(image.psf_extension))
+        t = Table(t)
+        return t
+
 
     ############################################################################################################
     ################################################### PSFs ###################################################
@@ -324,23 +446,28 @@ class Catalog:
     ):
         self.psfhom_target_filter = target_filter
         self.psfhom_inverse_filters = inverse_filters
+        self.metadata['psfhom_target_filter'] = self.psfhom_target_filter
+        self.metadata['psfhom_inverse_filters'] = self.psfhom_inverse_filters
 
         if target_filter not in self.filters:
             msg = f'Target filter must be in {self.filters}'
             self.logger.error(msg)
             sys.exit(1)
         
-        for filt in inverse_filters:
-            if filt not in self.filters:
-                msg = f'Inverse filter {filt} must be in {self.filters}'
-                self.logger.error(msg)
-                sys.exit(1)
+        # for filt in inverse_filters:
+        #     if filt not in self.filters:
+        #         msg = f'Inverse filter {filt} not in {self.filters}'
+        #         self.logger.warning(msg)
+        #         sys.exit(1)
             
 
         # For images with PSF smaller than the target, we perform normal PSF-homogenization 
         target_image = self.images.get(filter=target_filter)[0]
         other_filters = [f for f in self.filters if f != target_filter and f not in inverse_filters]
         images = self.images.get(filter=other_filters)
+
+        if images is None:
+            return
         
         for image in images:
             if 'mock' in image.sci_extension:
@@ -422,7 +549,7 @@ class Catalog:
 
             num += sci * wht
             den += wht
-            num[wht == 0] = np.nan
+            #num[wht == 0] = np.nan
             nbands[np.isfinite(sci)&(wht > 0)] += 1
 
         with warnings.catch_warnings():
@@ -482,8 +609,25 @@ class Catalog:
 
         return chi_mean
 
+    def _load_detection_image(self, sci, err, seg):
+
+        self.logger.info(f'Loading {sci}')
+        self.detection_image = Image(
+            filter = 'detec', 
+            tile = self.tile,
+            sci_file = sci, 
+            err_file = err, 
+            seg_file = seg,
+            wht_file = None,
+            psf_file = None,
+            hom_file = None,
+            memmap = self.memmap,
+        )
+
+
     def build_detection_image(
         self,
+        tile, 
         output_dir: str, 
         output_filename: str,
         method: str, # ['ivw', 'chi-mean', 'chi-sq']
@@ -502,14 +646,12 @@ class Catalog:
         if not os.path.exists(output_dir):
             os.mkdir(output_dir)
 
-        
-        # Get tile name from the catalog's images
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
         output_file = os.path.join(output_dir, output_filename)
         detec_file = output_file.replace('[tile]', tile)
         detec_sci_file = detec_file.replace('[ext]', 'sci')
         detec_err_file = detec_file.replace('[ext]', 'err')
+        self.metadata['detec_sci'] = detec_sci_file
+        self.metadata['detec_err'] = detec_err_file
         
         self.logger.info('Building detection images')
 
@@ -528,17 +670,7 @@ class Catalog:
             if (os.path.exists(detec_sci_file) and os.path.exists(detec_err_file)) and not overwrite:
                 self.logger.info(f'Skipping detection image generation for tile {tile}, detection image already exists!')
 
-                self.logger.info(f'Loading {detec_sci_file}')
-                self.detection_image = Image(
-                    filter = 'detec', 
-                    tile = tile,
-                    sci_file = detec_sci_file, 
-                    err_file = detec_err_file, 
-                    wht_file = None,
-                    psf_file = None,
-                    hom_file = None,
-                    memmap = self.memmap,
-                )
+                self._load_detection_image(detec_sci_file, detec_err_file, None)
                 return True
 
             detec_sci, detec_err = self._build_ivw_detection_image(
@@ -558,18 +690,8 @@ class Catalog:
             
             fits.writeto(detec_sci_file, detec_sci, header=detec_hdr, overwrite=True)
             fits.writeto(detec_err_file, detec_err, header=detec_hdr, overwrite=True)
-
-            self.detection_image = Image(
-                filter = 'detec', 
-                tile = tile,
-                sci_file = detec_sci_file, 
-                err_file = detec_err_file, 
-                wht_file = None,
-                psf_file = None,
-                hom_file = None,
-                memmap = self.memmap,
-            )
-
+            
+            self._load_detection_image(detec_sci_file, detec_err_file, None)
             return True
     
         else:
@@ -700,18 +822,17 @@ class Catalog:
                 objs_hot, segmap_hot, 
                 mask_scale_factor = kwargs['cold_mask_scale_factor'], 
                 mask_min_radius = kwargs['cold_mask_min_radius'], 
+                dilate_kernel_size = kwargs['cold_mask_dilate_kernel_size']
             )
 
-            self.logger.info(f"{tile}: {len(objs)} detections, {len(objs[objs['mode']=='cold'])} cold, {len(objs[objs['mode']=='hot'])} hot")
+            self.logger.info(f"{len(objs)} detections, {len(objs[objs['mode']=='cold'])} cold, {len(objs[objs['mode']=='hot'])} hot")
 
-        self.objects[tile] = objs
+        self.objects = objs
 
-        if save_segmap:
-            output_file = self.detection_image.sci_file.replace('sci.fits', 'seg.fits')
-            fits.writeto(output_file, data=segmap, header=detec_image.hdr, overwrite=True)
-            detec_image.seg_file = output_file
-        else:
-            self.detection_image.seg = segmap
+        seg_file = self.detection_image.sci_file.replace('sci.fits', 'seg.fits')
+        fits.writeto(seg_file, data=segmap, header=self.detection_image.hdr, overwrite=True)
+        self.detection_image.seg_file = seg_file
+        self.metadata['detec_seg'] = seg_file
 
     def _detect_sources_single_stage(
         self, 
@@ -772,6 +893,7 @@ class Catalog:
         objs2, segmap2,
         mask_scale_factor=None, # scale factor from objs1['a'] and objs['b'] that defines the elliptical mask
         mask_min_radius=None, # minimum circular radius for the elliptical mask (pixels)
+        dilate_kernel_size=None,
     ):
         '''
         Merges two lists of detections, objs1 and objs2, where all detections 
@@ -794,6 +916,11 @@ class Catalog:
         
         else:
             mask = segmap1 > 0
+
+        if dilate_kernel_size is not None:
+            kernel = Tophat2DKernel(dilate_kernel_size)
+            mask = binary_dilation(mask.astype(int), kernel.array).astype(bool)
+
         
         # Mask objects in objs2 with segmap pixels that overlap the mask
         ids_to_mask = np.unique(segmap2 * mask)[1:] 
@@ -860,10 +987,7 @@ class Catalog:
     ############################################################################################################
 
     def compute_kron_radius(self, windowed=False):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
-        self.logger.info(f'{tile}: Computing kron radius')
+        self.logger.info(f'Computing kron radius')
 
         detec = self.detection_image.sci / self.detection_image.err
         mask = np.isnan(detec)
@@ -881,18 +1005,14 @@ class Catalog:
         self.objects['flag'] |= krflag
 
     def compute_windowed_positions(self):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
-        self.logger.info(f'{tile}: Computing windowed positions')
+        self.logger.info(f'Computing windowed positions')
         objs = self.objects
         if 'kronrad' not in objs.columns:
             self.compute_kron_radius()
     
-        detec_image = self.detection_images.get(tile=tile)[0]
-        detec = detec_image.sci / detec_image.err
+        detec = self.detection_image.sci / self.detection_image.err
         mask = np.isnan(detec)
-        segmap = detec_image.seg
+        segmap = self.detection_image.seg
 
         flux, fluxerr, flag = sep.sum_ellipse(
             detec, objs['x'], objs['y'], 
@@ -917,20 +1037,15 @@ class Catalog:
         self.objects['ywin'] = ywin
 
     def compute_rhalf(self):
-
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
-        images = self.images.get()
-        detec_image = self.detection_images.get(tile=tile)[0]
-        segmap = detec_image.seg
+        images = self.images
+        segmap = self.detection_image.seg
         objs = self.objects
         if 'kronrad' not in objs.columns:
             self.compute_kron_radius()
 
         for image in images:
             band = image.filter
-            self.logger.info(f'{tile}: Computing half-light radii for band {band}')
+            self.logger.info(f'Computing half-light radii for band {band}')
 
             mask = np.isnan(image.sci)
 
@@ -952,25 +1067,17 @@ class Catalog:
 
     @property
     def windowed(self):
-        tiles = list(self.objects)
-        objs0 = self.objects[tiles[0]]
-        return 'xwin' in objs0.columns and 'ywin' in objs0.columns
+        return 'xwin' in self.objects.columns and 'ywin' in self.objects.columns
 
     def get_xy(self):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
         if self.windowed:
             return self.objects['xwin'], self.objects['ywin']
         else:
             return self.objects['x'], self.objects['y']
 
-    def add_ra_dec(self):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
+    def add_ra_dec(self):        
         x, y = self.get_xy()            
-        wcs = self.detection_images.get(tile=tile)[0].wcs
+        wcs = self.detection_image.wcs
         coords = wcs.pixel_to_world(x, y)
         ra = coords.ra.value
         dec = coords.dec.value
@@ -978,16 +1085,15 @@ class Catalog:
         self.objects['dec'] = dec
 
     def compute_weights(self):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
-        self.logger.info(f'{tile}: Getting weight map values')
+        self.logger.info(f'Getting weight map values')
         x, y = self.get_xy()            
-        for image in self.images.get():
+        for image in self.images:
             filt = image.filter
             aperture = CircularAperture(np.array([x, y]).T, r=5)
             aperstats = ApertureStats(image.wht, aperture)
             self.objects[f'wht_{filt}'] = aperstats.median
+            aperstats = ApertureStats(image.err, aperture)
+            self.objects[f'err_{filt}'] = aperstats.median
 
 
     ############################################################################################################
@@ -1035,23 +1141,19 @@ class Catalog:
         flux_unit: str = 'uJy',
     ):
         self.aperture_diameters = aperture_diameters
-        
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
+        self.metadata['aperture_diameters'] = aperture_diameters
 
-        images = self.images.get()
+        images = self.images
         images.sort('filter')
-        segmap = self.detection_images.get(tile=tile)[0].seg
+        segmap = self.detection_image.seg
 
         for image in images:
             filt = image.filter
 
             if psfhom:
-                self.logger.info(f'{tile}: Computing aper_hom photometry for {filt} (psf-homogenized)')
-                self._aper_hom = True
+                self.logger.info(f'Computing aper_hom photometry for {filt} (psf-homogenized)')
             else:
-                self.logger.info(f'{tile}: Computing aper_nat photometry for {filt}, (native resolution)')
-                self._aper_nat = True
+                self.logger.info(f'Computing aper_nat photometry for {filt}, (native resolution)')
 
             objs = self.objects
             image.convert_byteorder()
@@ -1069,7 +1171,7 @@ class Catalog:
             )
 
             if psfhom and filt in self.psfhom_inverse_filters:
-                self.logger.info(f'{tile}: Correcting {filt} based on {self.psfhom_target_filter} homogenization')
+                self.logger.info(f'Correcting {filt} based on {self.psfhom_target_filter} homogenization')
                 flux1, _, _ = self._compute_aper_photometry(
                     objs, image.hom, None, mask, segmap, aperture_diameters_pixels, windowed=self.windowed,
                 ) # flux1 = aperture flux in <target_filter>, psf-homogenized to <filter>
@@ -1142,19 +1244,15 @@ class Catalog:
         self, 
         kron_params: tuple[float,float] = (2.5,3.5),
         flux_unit: str = 'uJy',
-    ):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-        
-        images = self.images.get()
+    ):        
+        images = self.images
         images.sort('filter')
-        segmap = self.detection_images.get(tile=tile)[0].seg
+        segmap = self.detection_image.seg
 
         for image in images:
             filt = image.filter
             
-            self.logger.info(f'{tile}: Computing auto photometry for {filt}')
-            self._auto = True
+            self.logger.info(f'Computing auto photometry for {filt}')
 
             objs = self.objects
             if 'kronrad' not in objs.columns:
@@ -1173,7 +1271,7 @@ class Catalog:
             )
 
             if filt in self.psfhom_inverse_filters:
-                self.logger.info(f'{tile}: Correcting {filt} based on {self.psfhom_target_filter} homogenization')
+                self.logger.info(f'Correcting {filt} based on {self.psfhom_target_filter} homogenization')
                 flux1, _, _, _, _ = self._compute_auto_photometry(
                     objs, image.hom, None, mask, segmap, kron_params, windowed=self.windowed,
                 ) # flux1 = auto flux in <target_filter>, psf-homogenized to <filter>
@@ -1207,11 +1305,8 @@ class Catalog:
         kron_params1: tuple[float,float],
         kron_params2: tuple[float,float],
     ):
-        # Get tile name from the catalog's data
-        tile = self.tiles[0] if self.tiles else 'unknown'
-
-        images = self.images.get()
-        detec = self.detection_images.get(tile=tile)[0]
+        images = self.images
+        detec = self.detection_image
         segmap = detec.seg
 
         # Compute the kron correction from the given filter
@@ -1229,7 +1324,7 @@ class Catalog:
         else:
             raise ValueError(f'Cannot compute kron correction from {filt}')
 
-        self.logger.info(f'{tile}: Computing kron correction from {filt}')
+        self.logger.info(f'Computing kron correction from {filt}')
         mask = np.isnan(sci)
         objs = self.objects
         if 'kronrad' not in objs.columns:
@@ -1275,7 +1370,7 @@ class Catalog:
         """
         if len(self.tiles)==1:
             self.logger.info('Skipping merge_tiles, only one tile in catalog.')
-            self.objs_final = self.objects[self.tiles[0]]
+            self.objects = self.objects[self.tiles[0]]
             return
 
         self.logger.info(f'Merging {len(self.tiles)} tiles')
@@ -1285,7 +1380,7 @@ class Catalog:
         objs0['tile'] = tile0
         
         # remove objects from objs0 if they are >edge_mask pixels from a boundary
-        detec = self.detection_images.get(tile=tile0)[0]
+        detec = self.detection_image
         height0, width0 = detec.shape
         objs0_distance_to_edge = distance_to_nearest_edge(objs0['x'], objs0['y'], width0, height0)
         objs0 = objs0[objs0_distance_to_edge > edge_mask]
@@ -1298,7 +1393,7 @@ class Catalog:
             objs1['tile'] = tile1
 
             # remove objects from objs1 if they are >edge_mask pixels from a boundary
-            detec = self.detection_images.get(tile=tile1)[0]
+            detec = self.detection_image
             height1, width1 = detec.shape
             objs1_distance_to_edge = distance_to_nearest_edge(objs1['x'], objs1['y'], width1, height1)
             objs1 = objs1[objs1_distance_to_edge > edge_mask]
@@ -1330,7 +1425,20 @@ class Catalog:
 
         self.logger.info(f'Final catalog: {len(objs1)} objects')
         objs1['id'] = np.arange(len(objs1)).astype(int)
-        self.objs_final = objs1
+        self.objects = objs1
+
+    # def _collect_nsci(self, image, nrandom_pixels_per_tile, psfhom):
+    #     self.logger.info(image.tile)
+    #     if psfhom: 
+    #         nsci = image.hom * np.sqrt(image.wht)
+    #     else:
+    #         nsci = image.sci * np.sqrt(image.wht)
+    #     nsci[image.wht == 0] = np.nan
+    #     nsci = nsci[np.isfinite(nsci)]
+
+    #     # Select a subset of pixels to do the fitting — no need to use all of them (its slow)
+    #     nsci = np.random.choice(nsci, size=nrandom_pixels_per_tile)
+    #     return nsci
 
 
     def _measure_random_aperture_scaling(
@@ -1365,18 +1473,29 @@ class Catalog:
         aperture_diameters = np.power(np.linspace(np.power(min_radius*2, 1/index), np.power(max_radius*2, 1/index), num_radii), index)
 
         images = self.images.get(filter=filt)
+        detec_images = self.detection_images
 
+        # First, fit the pixel distribution of the NSCI image to get the baseline single-pixel RMS 
         self.logger.info('Fitting pixel distribution')
         nrandom_pixels_per_tile = 50000
+
+        # with Pool(processes=20) as pool:
+
+        #     fluxes = pool.map(partial(self._collect_nsci, nrandom_pixels_per_tile=nrandom_pixels_per_tile, psfhom=psfhom), images)
+        # fluxes = np.array(fluxes)
+        # _, _, rms1 = _fit_pixel_distribution(fluxes, sigma_upper=1.0, maxiters=5) 
+
         fluxes = np.zeros(nrandom_pixels_per_tile*len(images))
         i = 0
         for image in tqdm.tqdm(images):
             if psfhom: 
-                nsci = image.hom * np.sqrt(image.wht)
+                nsci = image.hom / image.err # * np.sqrt(image.wht)
             else:
-                nsci = image.sci * np.sqrt(image.wht)
+                nsci = image.sci / image.err # * np.sqrt(image.wht)
             nsci[image.wht == 0] = np.nan
             nsci = nsci[np.isfinite(nsci)]
+
+            # Select a subset of pixels to do the fitting — no need to use all of them (its slow)
             nsci = np.random.choice(nsci, size=nrandom_pixels_per_tile)
             fluxes[i:i+nrandom_pixels_per_tile] = nsci
             i += nrandom_pixels_per_tile
@@ -1393,9 +1512,9 @@ class Catalog:
         for image in tqdm.tqdm(images):
 
             if psfhom: 
-                nsci = image.hom * np.sqrt(image.wht)
+                nsci = image.hom / image.err #np.sqrt(image.wht)
             else:
-                nsci = image.sci * np.sqrt(image.wht)
+                nsci = image.sci / image.err #np.sqrt(image.wht)
             nsci[image.wht == 0] = np.nan
 
             nsci_random = np.random.normal(loc=0, scale=rms1_random, size=nsci.shape)
@@ -1610,10 +1729,10 @@ class Catalog:
             self.logger.info(f'Applying random aperture calibration for {filt}')
             pixel_scale = self.images.get(filter=filt)[0].pixel_scale
 
-            wht = self.objs_final[f'wht_{filt}']
+            err = self.objects[f'err_{filt}']
             
             if self.has_auto:
-                sqrtN_kron = np.sqrt(self.objs_final['kron1_area'])
+                sqrtN_kron = np.sqrt(self.objects['kron1_area'])
             if self.has_aper:
                 sqrtN_aper = np.sqrt(np.pi)*np.array(self.aperture_diameters)/pixel_scale/2
 
@@ -1623,10 +1742,11 @@ class Catalog:
                 result = self._get_random_aperture_curve(sqrtN_aper, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    rmsN = np.outer(1/np.sqrt(wht), result)
+                    rmsN = np.outer(err, result)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
-                self.objs_final.rename_column(f'e_aper_nat_{filt}', f'e_aper_nat_{filt}_uncal')
-                self.objs_final[f'e_aper_nat_{filt}'] = np.sqrt(self.objs_final[f'e_aper_nat_{filt}_uncal']**2 + rmsN**2)
+                self.objects.rename_column(f'e_aper_nat_{filt}', f'e_aper_nat_{filt}_uncal')
+                # self.objects[f'e_aper_nat_{filt}'] = np.sqrt(self.objects[f'e_aper_nat_{filt}_uncal']**2 + rmsN**2)
+                self.objects[f'e_aper_nat_{filt}'] = np.where(np.isfinite(self.objects[f'e_aper_nat_{filt}_uncal']), rmsN, np.nan)
             
             if self.has_aper_hom:
                 # psf-matched aperture photometry
@@ -1637,10 +1757,13 @@ class Catalog:
                 result = self._get_random_aperture_curve(sqrtN_aper, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    rmsN = np.outer(1/np.sqrt(wht), result)
+                    rmsN = np.outer(err, result)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
-                self.objs_final.rename_column(f'e_aper_hom_{filt}', f'e_aper_hom_{filt}_uncal')
-                self.objs_final[f'e_aper_hom_{filt}'] = np.sqrt(self.objs_final[f'e_aper_hom_{filt}_uncal']**2 + rmsN**2)
+                self.objects.rename_column(f'e_aper_hom_{filt}', f'e_aper_hom_{filt}_uncal')
+                # self.objects[f'e_aper_hom_{filt}'] = np.sqrt(self.objects[f'e_aper_hom_{filt}_uncal']**2 + rmsN**2)
+                self.objects[f'e_aper_hom_{filt}'] = np.where(np.isfinite(self.objects[f'e_aper_hom_{filt}_uncal']), rmsN, np.nan)
+                if filt in self.psfhom_inverse_filters:
+                    self.objects[f'e_aper_hom_{filt}'] *= self.obejcts[f'psf_corr_aper_{filt}']
 
             if self.has_auto:
                 # auto (kron) photometry
@@ -1651,10 +1774,13 @@ class Catalog:
                 result = self._get_random_aperture_curve(sqrtN_kron, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    rmsN = result/np.sqrt(wht)
+                    rmsN = result * err
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
-                self.objs_final.rename_column(f'e_auto_{filt}', f'e_auto_{filt}_uncal')
-                self.objs_final[f'e_auto_{filt}'] = np.sqrt(self.objs_final[f'e_auto_{filt}_uncal']**2 + rmsN**2)
+                self.objects.rename_column(f'e_auto_{filt}', f'e_auto_{filt}_uncal')
+                # self.objects[f'e_auto_{filt}'] = np.sqrt(self.objects[f'e_auto_{filt}_uncal']**2 + rmsN**2)
+                self.objects[f'e_auto_{filt}'] = np.where(np.isfinite(self.objects[f'e_auto_{filt}_uncal']), rmsN, np.nan)
+                if filt in self.psfhom_inverse_filters:
+                    self.objects[f'e_auto_{filt}'] *= self.obejcts[f'psf_corr_auto_{filt}']
 
 
 
@@ -1674,8 +1800,6 @@ class Catalog:
         self.logger.info(f'Computing PSF correction for {filt}')
 
         from photutils.aperture import EllipticalAperture, aperture_photometry
-
-
 
         a = np.linspace(0.05, 2.0, 50)
         q = np.linspace(0.05, 1, 50)
@@ -1734,27 +1858,21 @@ class Catalog:
 
         if self.has_auto:
             self.logger.info(f'Applying PSF corrections for auto photometry')
-            ai = self.objs_final['kron2_a']
-            bi = self.objs_final['kron2_b']
+            ai = self.objects['kron2_a']
+            bi = self.objects['kron2_b']
             qi = bi/ai
             kron_psf_corr = griddata(np.array([a,q]).T, c, (ai,qi), fill_value=1.0)
             for filt in self.filters:
-                self.objs_final[f'f_auto_{filt}'] *= kron_psf_corr
-                self.objs_final[f'e_auto_{filt}'] *= kron_psf_corr
+                self.objects[f'f_auto_{filt}'] *= kron_psf_corr
+                self.objects[f'e_auto_{filt}'] *= kron_psf_corr
         if self.has_aper_hom:
             self.logger.info(f'Applying PSF corrections for aper_hom photometry')
             aperture_diameters = np.array(self.aperture_diameters)
             aper_psf_corr = griddata(np.array([a,q]).T, c, (aperture_diameters/2, [1]*len(aperture_diameters)), fill_value=1.0)
             for filt in self.filters:
-                self.objs_final[f'f_aper_hom_{filt}'] *= aper_psf_corr
-                self.objs_final[f'e_aper_hom_{filt}'] *= aper_psf_corr
+                self.objects[f'f_aper_hom_{filt}'] *= aper_psf_corr
+                self.objects[f'e_aper_hom_{filt}'] *= aper_psf_corr
 
-    def write(
-        self, 
-        output_file,
-    ):
-        self.logger.info(f'Writing catalog to {output_file}')
-        self.objects.write(output_file, overwrite=True)
 
     @property
     def has_detections(self):
@@ -1762,15 +1880,15 @@ class Catalog:
 
     @property
     def has_auto(self):
-        return hasattr(self, '_auto')
+        return any(['_auto' in colname for colname in self.objects.columns])
     
     @property
     def has_aper_nat(self):
-        return hasattr(self, '_aper_nat')
+        return any(['_aper_nat' in colname for colname in self.objects.columns])
     
     @property
     def has_aper_hom(self):
-        return hasattr(self, '_aper_hom')
+        return any(['_aper_hom' in colname for colname in self.objects.columns])
 
     @property
     def has_photometry(self):
@@ -1779,4 +1897,3 @@ class Catalog:
     @property
     def has_aper(self):
         return self.has_aper_nat or self.has_aper_hom
-

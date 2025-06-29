@@ -556,11 +556,16 @@ class Images:
     def __radd__(self, other):
         return Images(self.images + other.images)
 
+    def append(self, addition: Image):
+        self.images.append(addition)
+
     def __iadd__(self, other):
         if isinstance(other, Image):
             self.images += [other]
         elif isinstance(other, Images):
             self.images += other.images
+        else:
+            raise ValueError
         return self
 
     def __contains__(self, item):

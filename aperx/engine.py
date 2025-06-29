@@ -1,8 +1,4 @@
 import os, sys
-try:
-    os.sched_setaffinity(0,range(48))
-except:
-    pass
 import multiprocess as mp
 from functools import partial
 from .catalog import Catalog
@@ -72,7 +68,7 @@ def _parse_mosaics(config):
     images_by_tile = {}
     for tile in tiles:
         tile_images = all_images.get(tile=tile)
-        images_by_tile[tile] = Images(tile_images, memmap=memmap)
+        images_by_tile[tile] = tile_images
 
     return all_images, images_by_tile
 
@@ -119,19 +115,30 @@ def main():
             az_average = config.psf_generation.az_average,
             logger = step_logger
         )
-
-    # Create per-tile catalogs
-    catalogs = {}
-    for tile in config.tiles:
-        tile_images = images_by_tile[tile]
-        catalogs[tile] = Catalog(tile_images, flux_unit=config.flux_unit)
     
-    def process_tile(tile, catalog):
-        base_logger.info(f'========================== Tile {tile} ==========================')
+    def process_tile(tile, overwrite=None, return_catalog=False):
+        tile_logger = utils.setup_logger(name=f'aperx.{tile}')
+        tile_logger.info(f'========================== Tile {tile} ==========================')
+
+        catalog_file = os.path.join(config.output_dir, config.output_filename.replace('.fits',f'_{tile}.fits'))
+        if overwrite is None:
+            overwrite = config.overwrite
+        if os.path.exists(catalog_file) and not overwrite:
+            tile_logger.info(f"Loading existing catalog {catalog_file}")
+            catalog = Catalog.load(catalog_file)
+            if return_catalog:
+                return catalog
+            else:
+                del catalog
+                return
+        
+        tile_logger.info(f'Initializing catalog')
+        tile_images = images_by_tile[tile]
+        catalog = Catalog(tile_images, flux_unit=config.flux_unit, tile=tile)
 
         # PSF homogenization
         if config.psf_homogenization.run:
-            step_logger = utils.setup_logger(name='aperx.psf_homogenization')
+            step_logger = utils.setup_logger(name=f'aperx.{tile}.psf_homogenization')
             catalog.logger = step_logger
 
             target_filter = utils.validate_param(config.psf_homogenization, 'target_filter', default='f444w', message="'psf_homogenization.target_filter ' not specified, defaulting to f444w", logger=step_logger)
@@ -146,15 +153,16 @@ def main():
                 overwrite=overwrite,
             )
 
-
+        tile_logger.info(f'Starting source detection')
         if config.source_detection.run: 
-            step_logger = utils.setup_logger(name='aperx.source_detection')
+            step_logger = utils.setup_logger(name=f'aperx.{tile}.source_detection')
             catalog.logger = step_logger
             
             sigma_upper = utils.validate_param(config.source_detection, 'sigma_upper', default=1.0, message="'source_detection.sigma_upper' not specified, defaulting to 1.0", logger=step_logger)
             maxiters = utils.validate_param(config.source_detection, 'maxiters', default=3, message="'source_detection.maxiters' not specified, defaulting to 3", logger=step_logger)
 
             detec_success = catalog.build_detection_image(
+                tile = tile,
                 output_dir = config.source_detection.detection_image_dir,
                 output_filename = config.source_detection.detection_image_filename,
                 method = config.source_detection.detection_image_method,
@@ -210,10 +218,10 @@ def main():
 
 
         if config.photometry.run: 
-            step_logger = utils.setup_logger(name='aperx.photometry')
+            step_logger = utils.setup_logger(name=f'aperx.{tile}.photometry')
             catalog.logger = step_logger
             
-            if not tile in catalog.objects:
+            if catalog.objects is None:
                 step_logger.warning('Cannot run photometry on a catalog without detections! Did you forget to enable source_detection?')
             else:
                     
@@ -251,27 +259,34 @@ def main():
                             kron_params2 = config.photometry.auto.kron_corr_params,
                         )
         
-        return catalog
+        # Write output to file
+        catalog.write(output_file = catalog_file)
+
+        if return_catalog:
+            return catalog
+        else:
+            del catalog
+            return
     
     # Process each tile
-    processed_catalogs = {}
     if config.parallel:
         import multiprocessing
         n_procs = int(multiprocessing.cpu_count()/2)
-
-        # Create list of (tile, catalog) pairs for parallel processing
-        tile_catalog_pairs = [(tile, catalogs[tile]) for tile in config.tiles]
-        
-        def process_tile_wrapper(args):
-            tile, catalog = args
-            return tile, process_tile(tile, catalog)
         
         with mp.Pool(n_procs) as pool:
-            results = pool.map(process_tile_wrapper, tile_catalog_pairs)
-            processed_catalogs = dict(results)
+            for tile in config.tiles:
+                pool.apply_async(process_tile, args = (tile, ))
+            pool.close()
+            pool.join()
     else:
         for tile in config.tiles:
-            processed_catalogs[tile] = process_tile(tile, catalogs[tile])
+            process_tile(tile)
+
+        
+    # Reload tiles from FITS files
+    catalogs = {}
+    for tile in config.tiles:
+        catalogs[tile] = process_tile(tile, overwrite=False, return_catalog=True)
         
 
 
@@ -281,8 +296,8 @@ def main():
         step_logger = utils.setup_logger(name='aperx.post_processing')
 
         if config.post_processing.merge_tiles.run:
-            # Check if any catalogs have detections
-            has_detections = any(catalog.has_detections for catalog in processed_catalogs.values())
+            # Check if catalogs have detections
+            has_detections = all(catalog.has_detections for catalog in catalogs.values())
             if not has_detections:
                 step_logger.warning('Cannot merge tiles without detections! Did you forget to enable source_detection?')
             else:
@@ -302,11 +317,12 @@ def main():
                     logger=step_logger
                 )
                 merged_catalog = merge_catalogs(
-                    processed_catalogs, 
+                    catalogs, 
                     matching_radius=matching_radius, 
                     edge_mask=edge_mask,
                     logger=step_logger
                 )
+                del catalogs
 
         if config.post_processing.random_apertures.run and merged_catalog is not None: 
             merged_catalog.logger = step_logger
@@ -320,7 +336,7 @@ def main():
                 output_dir = config.output_dir,
             )
             
-            if merged_catalog.has_final_catalog and merged_catalog.has_photometry:
+            if merged_catalog.has_photometry:
                 merged_catalog.apply_random_aperture_error_calibration(coeff_dir=config.output_dir)
 
 
@@ -332,12 +348,12 @@ def main():
                 overwrite = config.post_processing.psf_corrections.overwrite,
                 plot = config.post_processing.psf_corrections.checkplots)
 
-            if merged_catalog.has_final_catalog and merged_catalog.has_photometry:
+            if merged_catalog.has_photometry:
                 merged_catalog.apply_psf_corrections(psf_corr_file)
 
     # Write final catalog
     catalog_file = os.path.join(config.output_dir, config.output_filename)
-    if merged_catalog is None or not merged_catalog.has_final_catalog:
+    if merged_catalog is None:
         base_logger.warning('Could not write catalog, no final merged catalog available. Something went wrong?')
     else:
         merged_catalog.write(output_file = catalog_file)
