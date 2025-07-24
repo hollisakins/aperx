@@ -19,12 +19,12 @@ from astropy.table import Table, vstack
 from photutils.aperture import aperture_photometry, CircularAperture, ApertureStats
 from astropy.coordinates import SkyCoord
 
-from multiprocessing import Pool
-from functools import partial
+# import sep
+# sep.set_extract_pixstack(int(1e7))
+# sep.set_sub_object_limit(4096)
 
-import sep
-sep.set_extract_pixstack(int(1e7))
-sep.set_sub_object_limit(4096)
+from photutils.segmentation import detect_sources, deblend_sources, SourceCatalog
+from astropy.convolution import convolve_fft
 
 def gauss(x, A, mu, sigma):
     return A * np.exp(-0.5*(x-mu)**2/sigma**2)
@@ -266,9 +266,6 @@ def merge_catalogs(
     merged_catalog.metadata['psfhom_inverse_filters'] = merged_catalog.psfhom_inverse_filters
     merged_catalog.aperture_diameters = catalog.aperture_diameters
     merged_catalog.metadata['aperture_diameters'] = merged_catalog.aperture_diameters
-    merged_catalog.metadata['detec_sci'] = all_detection_images[0].sci_file.replace(all_detection_images[0].tile, '[tile]')
-    merged_catalog.metadata['detec_err'] = all_detection_images[0].err_file.replace(all_detection_images[0].tile, '[tile]')
-    merged_catalog.metadata['detec_seg'] = all_detection_images[0].seg_file.replace(all_detection_images[0].tile, '[tile]')
     
     return merged_catalog
 
@@ -382,7 +379,6 @@ class Catalog:
     @staticmethod
     def metadata_to_header(metadata: dict):
         header = {}
-        header['TILE'] = metadata['tile']
         header['FLUXUNIT'] = metadata['flux_unit']
         header['PSF_TARG'] = metadata['psfhom_target_filter']
         header['PSF_INV'] = ", ".join(metadata['psfhom_inverse_filters']) if len(metadata['psfhom_inverse_filters'])>1 else ""
@@ -509,7 +505,6 @@ class Catalog:
 
     def _build_ivw_detection_image(
         self, 
-        tile: str,
         detection_bands: List[str], 
         sigma_upper: float = 1.0,
         maxiters: int = 3,
@@ -547,12 +542,11 @@ class Catalog:
             else:
                 sci = image.sci
             wht = image.wht # weight image
-            nbands[np.isfinite(sci)&(wht > 0)] += 1
-            sci[~np.isfinite(sci)] = 0
 
             num += sci * wht
             den += wht
-            #num[wht == 0] = np.nan
+            num[wht == 0] = np.nan
+            nbands[np.isfinite(sci)&(wht > 0)] += 1
 
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -749,9 +743,10 @@ class Catalog:
                 minarea=kwargs['minarea'],
                 deblend_nthresh=kwargs['deblend_nthresh'],
                 deblend_cont=kwargs['deblend_cont'],
-                filter_type=kwargs['filter_type'],
-                clean=kwargs['clean'],
-                clean_param=kwargs['clean_param'],
+                # filter_type=kwargs['filter_type'],
+                # clean=kwargs['clean'],
+                # clean_param=kwargs['clean_param'],
+                wcs = self.detection_image.wcs, 
             )
             self.logger.info(f"{len(objs)} detections")
 
@@ -796,9 +791,10 @@ class Catalog:
                 minarea=kwargs['cold']['minarea'],
                 deblend_nthresh=kwargs['cold']['deblend_nthresh'],
                 deblend_cont=kwargs['cold']['deblend_cont'],
-                filter_type=kwargs['cold']['filter_type'],
-                clean=kwargs['cold']['clean'],
-                clean_param=kwargs['cold']['clean_param'],
+                # filter_type=kwargs['cold']['filter_type'],
+                # clean=kwargs['cold']['clean'],
+                # clean_param=kwargs['cold']['clean_param'],
+                wcs = self.detection_image.wcs, 
             )
             objs_cold['mode'] = 'cold'
 
@@ -812,9 +808,10 @@ class Catalog:
                 minarea=kwargs['hot']['minarea'],
                 deblend_nthresh=kwargs['hot']['deblend_nthresh'],
                 deblend_cont=kwargs['hot']['deblend_cont'],
-                filter_type=kwargs['hot']['filter_type'],
-                clean=kwargs['hot']['clean'],
-                clean_param=kwargs['hot']['clean_param'],
+                # filter_type=kwargs['hot']['filter_type'],
+                # clean=kwargs['hot']['clean'],
+                # clean_param=kwargs['hot']['clean_param'],
+                wcs = self.detection_image.wcs, 
             )
             objs_hot['mode'] = 'hot'
             
@@ -824,7 +821,6 @@ class Catalog:
                 objs_hot, segmap_hot, 
                 mask_scale_factor = kwargs['cold_mask_scale_factor'], 
                 mask_min_radius = kwargs['cold_mask_min_radius'], 
-                dilate_kernel_size = kwargs['cold_mask_dilate_kernel_size']
             )
 
             self.logger.info(f"{len(objs)} detections, {len(objs[objs['mode']=='cold'])} cold, {len(objs[objs['mode']=='hot'])} hot")
@@ -836,8 +832,8 @@ class Catalog:
         self.detection_image.seg_file = seg_file
         self.metadata['detec_seg'] = seg_file
 
+    @staticmethod
     def _detect_sources_single_stage(
-        self, 
         detec,
         mask,
         kernel_type,
@@ -846,9 +842,7 @@ class Catalog:
         minarea, 
         deblend_nthresh, 
         deblend_cont, 
-        filter_type='matched', 
-        clean=True,
-        clean_param=1.0,
+        wcs
     ):
 
         if kernel_type == 'tophat':
@@ -872,12 +866,21 @@ class Catalog:
         else:
             raise ValueError('kernel_type must be one of `gaussian` or `tophat`')
 
-        objs, segmap = sep.extract(
-            detec, 
-            thresh=thresh, minarea=minarea,
-            deblend_nthresh=deblend_nthresh, deblend_cont=deblend_cont, mask=mask,
-            filter_type=filter_type, filter_kernel=kernel, clean=clean, clean_param=clean_param,
-            segmentation_map=True)
+        detec_conv = convolve_fft(detec, kernel, allow_huge=True)
+        segmap = detect_sources(detec_conv, thresh, npixels=minarea, mask=mask, connectivity=8)
+        segmap_deblend = deblend_sources(detec_conv, segmap, 
+            npixels=minarea, nlevels=deblend_nthresh, contrast=deblend_cont, progress_bar=True)
+
+        objs = SourceCatalog(detec_conv, segmap_deblend, mask=mask, convolved_data=detec_conv)
+        print(objs)
+        quit()
+
+        # objs, segmap = sep.extract(
+        #     detec, 
+        #     thresh=thresh, minarea=minarea,
+        #     deblend_nthresh=deblend_nthresh, deblend_cont=deblend_cont, mask=mask,
+        #     filter_type=filter_type, filter_kernel=kernel, clean=clean, clean_param=clean_param,
+        #     segmentation_map=True)
 
         ids = np.arange(len(objs))+1
         ids = ids.astype(int)
@@ -887,7 +890,7 @@ class Catalog:
         # Fix angles
         objs['theta'][objs['theta']>np.pi/2] -= np.pi
 
-        return objs, segmap    
+        return objs, segmap_deblend    
     
     def _merge_detections(
         self,
@@ -895,7 +898,6 @@ class Catalog:
         objs2, segmap2,
         mask_scale_factor=None, # scale factor from objs1['a'] and objs['b'] that defines the elliptical mask
         mask_min_radius=None, # minimum circular radius for the elliptical mask (pixels)
-        dilate_kernel_size=None,
     ):
         '''
         Merges two lists of detections, objs1 and objs2, where all detections 
@@ -918,13 +920,6 @@ class Catalog:
         
         else:
             mask = segmap1 > 0
-
-        if dilate_kernel_size is not None:
-            from astropy.convolution import Tophat2DKernel
-            from scipy.ndimage import binary_dilation
-            kernel = Tophat2DKernel(dilate_kernel_size)
-            mask = binary_dilation(mask.astype(int), kernel.array).astype(bool)
-
         
         # Mask objects in objs2 with segmap pixels that overlap the mask
         ids_to_mask = np.unique(segmap2 * mask)[1:] 
@@ -1096,8 +1091,6 @@ class Catalog:
             aperture = CircularAperture(np.array([x, y]).T, r=5)
             aperstats = ApertureStats(image.wht, aperture)
             self.objects[f'wht_{filt}'] = aperstats.median
-            aperstats = ApertureStats(image.err, aperture)
-            self.objects[f'err_{filt}'] = aperstats.median
 
 
     ############################################################################################################
@@ -1431,19 +1424,6 @@ class Catalog:
         objs1['id'] = np.arange(len(objs1)).astype(int)
         self.objects = objs1
 
-    # def _collect_nsci(self, image, nrandom_pixels_per_tile, psfhom):
-    #     self.logger.info(image.tile)
-    #     if psfhom: 
-    #         nsci = image.hom * np.sqrt(image.wht)
-    #     else:
-    #         nsci = image.sci * np.sqrt(image.wht)
-    #     nsci[image.wht == 0] = np.nan
-    #     nsci = nsci[np.isfinite(nsci)]
-
-    #     # Select a subset of pixels to do the fitting — no need to use all of them (its slow)
-    #     nsci = np.random.choice(nsci, size=nrandom_pixels_per_tile)
-    #     return nsci
-
 
     def _measure_random_aperture_scaling(
         self,
@@ -1478,24 +1458,21 @@ class Catalog:
 
         images = self.images.get(filter=filt)
         detec_images = self.detection_images
+        print(images)
+        print(detec_images)
+        print(detec_images[0].seg)
+        quit()
 
         # First, fit the pixel distribution of the NSCI image to get the baseline single-pixel RMS 
         self.logger.info('Fitting pixel distribution')
         nrandom_pixels_per_tile = 50000
-
-        # with Pool(processes=20) as pool:
-
-        #     fluxes = pool.map(partial(self._collect_nsci, nrandom_pixels_per_tile=nrandom_pixels_per_tile, psfhom=psfhom), images)
-        # fluxes = np.array(fluxes)
-        # _, _, rms1 = _fit_pixel_distribution(fluxes, sigma_upper=1.0, maxiters=5) 
-
         fluxes = np.zeros(nrandom_pixels_per_tile*len(images))
         i = 0
         for image in tqdm.tqdm(images):
             if psfhom: 
-                nsci = image.hom / image.err # * np.sqrt(image.wht)
+                nsci = image.hom * np.sqrt(image.wht)
             else:
-                nsci = image.sci / image.err # * np.sqrt(image.wht)
+                nsci = image.sci * np.sqrt(image.wht)
             nsci[image.wht == 0] = np.nan
             nsci = nsci[np.isfinite(nsci)]
 
@@ -1516,9 +1493,9 @@ class Catalog:
         for image in tqdm.tqdm(images):
 
             if psfhom: 
-                nsci = image.hom / image.err #np.sqrt(image.wht)
+                nsci = image.hom * np.sqrt(image.wht)
             else:
-                nsci = image.sci / image.err #np.sqrt(image.wht)
+                nsci = image.sci * np.sqrt(image.wht)
             nsci[image.wht == 0] = np.nan
 
             nsci_random = np.random.normal(loc=0, scale=rms1_random, size=nsci.shape)
@@ -1733,7 +1710,7 @@ class Catalog:
             self.logger.info(f'Applying random aperture calibration for {filt}')
             pixel_scale = self.images.get(filter=filt)[0].pixel_scale
 
-            err = self.objects[f'err_{filt}']
+            wht = self.objects[f'wht_{filt}']
             
             if self.has_auto:
                 sqrtN_kron = np.sqrt(self.objects['kron1_area'])
@@ -1746,11 +1723,10 @@ class Catalog:
                 result = self._get_random_aperture_curve(sqrtN_aper, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    rmsN = np.outer(err, result)
+                    rmsN = np.outer(1/np.sqrt(wht), result)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
                 self.objects.rename_column(f'e_aper_nat_{filt}', f'e_aper_nat_{filt}_uncal')
-                # self.objects[f'e_aper_nat_{filt}'] = np.sqrt(self.objects[f'e_aper_nat_{filt}_uncal']**2 + rmsN**2)
-                self.objects[f'e_aper_nat_{filt}'] = np.where(np.isfinite(self.objects[f'e_aper_nat_{filt}_uncal']), rmsN, np.nan)
+                self.objects[f'e_aper_nat_{filt}'] = np.sqrt(self.objects[f'e_aper_nat_{filt}_uncal']**2 + rmsN**2)
             
             if self.has_aper_hom:
                 # psf-matched aperture photometry
@@ -1761,13 +1737,10 @@ class Catalog:
                 result = self._get_random_aperture_curve(sqrtN_aper, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    rmsN = np.outer(err, result)
+                    rmsN = np.outer(1/np.sqrt(wht), result)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
                 self.objects.rename_column(f'e_aper_hom_{filt}', f'e_aper_hom_{filt}_uncal')
-                # self.objects[f'e_aper_hom_{filt}'] = np.sqrt(self.objects[f'e_aper_hom_{filt}_uncal']**2 + rmsN**2)
-                self.objects[f'e_aper_hom_{filt}'] = np.where(np.isfinite(self.objects[f'e_aper_hom_{filt}_uncal']), rmsN, np.nan)
-                if filt in self.psfhom_inverse_filters:
-                    self.objects[f'e_aper_hom_{filt}'] *= self.objects[f'psf_corr_aper_{filt}']
+                self.objects[f'e_aper_hom_{filt}'] = np.sqrt(self.objects[f'e_aper_hom_{filt}_uncal']**2 + rmsN**2)
 
             if self.has_auto:
                 # auto (kron) photometry
@@ -1778,13 +1751,10 @@ class Catalog:
                 result = self._get_random_aperture_curve(sqrtN_kron, coeff_file)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    rmsN = result * err
+                    rmsN = result/np.sqrt(wht)
                 rmsN = (rmsN*u.nJy).to(u.Unit(self.flux_unit)).value
                 self.objects.rename_column(f'e_auto_{filt}', f'e_auto_{filt}_uncal')
-                # self.objects[f'e_auto_{filt}'] = np.sqrt(self.objects[f'e_auto_{filt}_uncal']**2 + rmsN**2)
-                self.objects[f'e_auto_{filt}'] = np.where(np.isfinite(self.objects[f'e_auto_{filt}_uncal']), rmsN, np.nan)
-                if filt in self.psfhom_inverse_filters:
-                    self.objects[f'e_auto_{filt}'] *= self.objects[f'psf_corr_auto_{filt}']
+                self.objects[f'e_auto_{filt}'] = np.sqrt(self.objects[f'e_auto_{filt}_uncal']**2 + rmsN**2)
 
 
 
@@ -1804,6 +1774,8 @@ class Catalog:
         self.logger.info(f'Computing PSF correction for {filt}')
 
         from photutils.aperture import EllipticalAperture, aperture_photometry
+
+
 
         a = np.linspace(0.05, 2.0, 50)
         q = np.linspace(0.05, 1, 50)
@@ -1876,22 +1848,6 @@ class Catalog:
             for filt in self.filters:
                 self.objects[f'f_aper_hom_{filt}'] *= aper_psf_corr
                 self.objects[f'e_aper_hom_{filt}'] *= aper_psf_corr
-
-    def set_missing_to_nan(self):
-
-        for filt in self.filters:
-            if self.has_aper_nat:
-                cond = ~np.isfinite(self.objects[f'f_aper_nat_{filt}']) | (self.objects[f'f_aper_nat_{filt}'] == 0) | ~np.isfinite(self.objects[f'e_aper_nat_{filt}_uncal']) | (self.objects[f'e_aper_nat_{filt}_uncal'] == 0)
-                self.objects[f'f_aper_nat_{filt}'][cond] = np.nan
-                self.objects[f'e_aper_nat_{filt}'][cond] = np.nan
-            if self.has_aper_hom:
-                cond = ~np.isfinite(self.objects[f'f_aper_hom_{filt}']) | (self.objects[f'f_aper_hom_{filt}'] == 0) | ~np.isfinite(self.objects[f'e_aper_hom_{filt}_uncal']) | (self.objects[f'e_aper_hom_{filt}_uncal'] == 0)
-                self.objects[f'f_aper_hom_{filt}'][cond] = np.nan
-                self.objects[f'e_aper_hom_{filt}'][cond] = np.nan
-            if self.has_auto:
-                cond = ~np.isfinite(self.objects[f'f_auto_{filt}']) | (self.objects[f'f_auto_{filt}'] == 0) | ~np.isfinite(self.objects[f'e_auto_{filt}_uncal']) | (self.objects[f'e_auto_{filt}_uncal'] == 0)
-                self.objects[f'f_auto_{filt}'][cond] = np.nan
-                self.objects[f'e_auto_{filt}'][cond] = np.nan
 
 
     @property

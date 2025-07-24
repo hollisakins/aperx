@@ -351,6 +351,8 @@ def main():
             if merged_catalog.has_photometry:
                 merged_catalog.apply_psf_corrections(psf_corr_file)
 
+    merged_catalog.set_missing_to_nan()
+
     # Write final catalog
     catalog_file = os.path.join(config.output_dir, config.output_filename)
     if merged_catalog is None:
